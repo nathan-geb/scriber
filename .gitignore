@@ -3,6 +3,9 @@ node_modules/
 .pnp
 .pnp.js
 
+# Database temp files
+db_temp/
+
 # Build outputs
 dist/
 build/
