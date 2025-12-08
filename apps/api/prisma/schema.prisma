@@ -1,0 +1,282 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String                  @id @default(uuid())
+  email                String                  @unique
+  password             String?
+  name                 String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  role                 Role                    @default(USER)
+  isActive             Boolean                 @default(true)
+  meetings             Meeting[]
+  notifications        Notification[]
+  notificationSettings NotificationPreference?
+  subscription         Subscription?
+  tags                 Tag[]
+  templates            MinutesTemplate[]
+}
+
+model MinutesTemplate {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  description String?
+  format      String   // "markdown" | "bullets" | "formal"
+  sections    Json     // Array of section configs
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Plan {
+  id                  String         @id @default(uuid())
+  name                String         @unique
+  maxMinutesPerUpload Int            @default(5)
+  maxUploadsPerWeek   Int            @default(1)
+  monthlyMinutesLimit Int            @default(60)
+  price               Decimal        @default(0.0)
+  currency            String         @default("USD")
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  subscriptions       Subscription[]
+}
+
+model Subscription {
+  id       String        @id @default(uuid())
+  userId   String        @unique
+  planId   String
+  active   Boolean       @default(true)
+  startsAt DateTime      @default(now())
+  endsAt   DateTime?
+  plan     Plan          @relation(fields: [planId], references: [id])
+  user     User          @relation(fields: [userId], references: [id])
+  usage    WeeklyUsage[]
+}
+
+model WeeklyUsage {
+  id               String       @id @default(uuid())
+  subscriptionId   String
+  weekStartDate    DateTime
+  uploadCount      Int          @default(0)
+  minutesProcessed Int          @default(0)
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([subscriptionId, weekStartDate])
+}
+
+model Meeting {
+  id                   String              @id @default(uuid())
+  userId               String
+  title                String
+  originalFileName     String
+  durationSeconds      Int                 @default(0)
+  fileUrl              String?
+  status               MeetingStatus       @default(UPLOADING)
+  languageCode         String?
+  transcriptLang       String?
+  minutesLang          String?
+  qualityScore         Float?              // 0-100 transcript quality
+  inaudibleCount       Int                 @default(0)
+  avgSpeakerConfidence Float?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags                 MeetingTag[]
+  minutes              Minutes?
+  shareLinks           ShareLink[]
+  speakers             Speaker[]
+  transcript           TranscriptSegment[]
+  keyMoments           KeyMoment[]
+}
+
+model KeyMoment {
+  id          String      @id @default(uuid())
+  meetingId   String
+  timestamp   Float       // Time in seconds
+  label       String      // Short label (e.g., "Decision Made")
+  description String?     // Longer description
+  type        MomentType  @default(CUSTOM)
+  isAutomatic Boolean     @default(false) // AI-detected vs user-created
+  createdBy   String?     // userId if user-created
+  createdAt   DateTime    @default(now())
+  meeting     Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+}
+
+enum MomentType {
+  DECISION
+  ACTION_ITEM
+  QUESTION
+  KEY_POINT
+  DISAGREEMENT
+  CUSTOM
+}
+
+model TranscriptSegment {
+  id            String                @id @default(uuid())
+  meetingId     String
+  speakerId     String?
+  startTime     Float
+  endTime       Float
+  text          String
+  languagesUsed String[]              @default([])  // ["en", "am"]
+  meeting       Meeting               @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  speaker       Speaker?              @relation(fields: [speakerId], references: [id])
+  corrections   TranscriptCorrection[]
+  edits         SegmentEdit[]
+}
+
+model TranscriptCorrection {
+  id            String            @id @default(uuid())
+  segmentId     String
+  originalText  String            // The original [inaudible] or unclear text
+  correctedText String            // User's correction
+  correctedBy   String            // userId
+  createdAt     DateTime          @default(now())
+  segment       TranscriptSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([segmentId])
+}
+
+model SegmentEdit {
+  id            String            @id @default(uuid())
+  segmentId     String
+  previousText  String            // Text before edit
+  newText       String            // Text after edit
+  editedBy      String            // userId
+  editReason    String?           // Optional reason for edit
+  createdAt     DateTime          @default(now())
+  segment       TranscriptSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([segmentId])
+}
+
+model Speaker {
+  id             String              @id @default(uuid())
+  meetingId      String
+  name           String
+  isUnknown      Boolean             @default(false)
+  nameConfidence Float               @default(0.0)  // 0.0-1.0 from Gemini
+  isConfirmed    Boolean             @default(false) // User confirmed name
+  meeting        Meeting             @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  segments       TranscriptSegment[]
+}
+
+model Minutes {
+  id        String           @id @default(uuid())
+  meetingId String           @unique
+  content   String
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  meeting   Meeting          @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  versions  MinutesVersion[]
+}
+
+model MinutesVersion {
+  id        String   @id @default(uuid())
+  minutesId String
+  content   String
+  version   Int
+  createdAt DateTime @default(now())
+  minutes   Minutes  @relation(fields: [minutesId], references: [id], onDelete: Cascade)
+
+  @@index([minutesId, version])
+}
+
+model NotificationPreference {
+  id          String  @id @default(uuid())
+  userId      String  @unique
+  email       Boolean @default(true)
+  push        Boolean @default(true)
+  deviceToken String?
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Tag {
+  id        String       @id @default(uuid())
+  userId    String
+  name      String
+  color     String       @default("#6366f1")
+  createdAt DateTime     @default(now())
+  meetings  MeetingTag[]
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
+model MeetingTag {
+  id        String   @id @default(uuid())
+  meetingId String
+  tagId     String
+  createdAt DateTime @default(now())
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, tagId])
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  read      Boolean          @default(false)
+  meetingId String?
+  createdAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ShareLink {
+  id        String    @id @default(uuid())
+  meetingId String
+  token     String    @unique
+  expiresAt DateTime?
+  shareType ShareType @default(FULL)
+  createdAt DateTime  @default(now())
+  meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum MeetingStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING_TRANSCRIPT
+  TRANSCRIPT_READY
+  PROCESSING_MINUTES
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum NotificationType {
+  TRANSCRIPTION_COMPLETE
+  MINUTES_COMPLETE
+  TRANSCRIPTION_FAILED
+  MINUTES_FAILED
+  SYSTEM
+}
+
+enum ShareType {
+  FULL
+  MINUTES
+  TRANSCRIPT
+}

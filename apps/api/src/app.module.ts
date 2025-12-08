@@ -1,0 +1,77 @@
+import { Module } from '@nestjs/common';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+import { UploadsModule } from './uploads/uploads.module';
+import { TranscriptionsModule } from './transcriptions/transcriptions.module';
+import { MinutesModule } from './minutes/minutes.module';
+import { MeetingsModule } from './meetings/meetings.module';
+import { PrismaModule } from './prisma/prisma.module';
+import { ExportsModule } from './exports/exports.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { AdminModule } from './admin/admin.module';
+import { TagsModule } from './tags/tags.module';
+import { SpeakersModule } from './speakers/speakers.module';
+import { UsageModule } from './usage/usage.module';
+import { SharesModule } from './shares/shares.module';
+import { EventsModule } from './events/events.module';
+import { QueueModule } from './queue/queue.module';
+import { CorrectionsModule } from './corrections/corrections.module';
+import { SegmentsModule } from './segments/segments.module';
+import { MomentsModule } from './moments/moments.module';
+import { QualityModule } from './quality/quality.module';
+import { TemplatesModule } from './templates/templates.module';
+
+@Module({
+  imports: [
+    // Rate limiting - default 100 requests per minute
+    ThrottlerModule.forRoot([
+      {
+        name: 'short',
+        ttl: 1000, // 1 second
+        limit: 5, // 5 requests per second
+      },
+      {
+        name: 'medium',
+        ttl: 10000, // 10 seconds
+        limit: 20, // 20 requests per 10 seconds
+      },
+      {
+        name: 'long',
+        ttl: 60000, // 1 minute
+        limit: 100, // 100 requests per minute
+      },
+    ]),
+    PrismaModule,
+    AuthModule,
+    UsersModule,
+    UploadsModule,
+    TranscriptionsModule,
+    MinutesModule,
+    MeetingsModule,
+    ExportsModule,
+    NotificationsModule,
+    AdminModule,
+    TagsModule,
+    SpeakersModule,
+    UsageModule,
+    SharesModule,
+    EventsModule,
+    QueueModule,
+    CorrectionsModule,
+    SegmentsModule,
+    MomentsModule,
+    QualityModule,
+    TemplatesModule,
+  ],
+  controllers: [],
+  providers: [
+    // Apply ThrottlerGuard globally
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
+})
+export class AppModule { }

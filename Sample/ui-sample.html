@@ -1,0 +1,682 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+Mic,
+FileAudio,
+UploadCloud,
+CheckCircle2,
+AlertCircle,
+Clock,
+MoreVertical,
+FileText,
+Download,
+Share2,
+Settings,
+User,
+CreditCard,
+ChevronRight,
+Play,
+Pause,
+SkipBack,
+SkipForward,
+Edit2,
+Menu,
+X,
+Languages,
+Sparkles,
+LayoutTemplate,
+Grid,
+List,
+Calendar,
+Search,
+ArrowLeft
+} from 'lucide-react';
+
+/**
+* ELEVATE SCRIBE - DESIGN TOKENS & THEME
+* Updated with "Midnight Library" aesthetic.
+*/
+const theme = {
+colors: {
+primary: 'bg-indigo-600',
+primaryHover: 'hover:bg-indigo-500', // Lighter hover for dark mode feel
+primaryLight: 'bg-indigo-50',
+primaryText: 'text-indigo-400', // Lighter for dark backgrounds
+secondary: 'bg-[#0f172a]', // Deep Navy (Slate 900)
+sidebar: 'bg-[#0b1121]', // Even darker for sidebar
+background: 'bg-[#f8fafc]', // Very light slate
+surface: 'bg-white',
+paper: 'bg-[#fdfbf7]', // Warm paper tone for reading
+border: 'border-slate-200',
+textMain: 'text-slate-900',
+textMuted: 'text-slate-500',
+success: 'text-emerald-500',
+warning: 'text-amber-500',
+danger: 'text-rose-500',
+},
+typography: {
+sans: 'font-sans',
+serif: 'font-serif', // For the "Reader" feel
+}
+};
+
+// --- MOCK DATA ---
+
+const MOCK_TRANSCRIPT = [
+{ id: 1, speaker: "Speaker A", timestamp: "00:00", text: "Good morning everyone. Let's start the meeting regarding the
+new infrastructure project." },
+{ id: 2, speaker: "Speaker B", timestamp: "00:15", text: "Selam. Yes, I have the designs here. As you can see, we
+integrated the legacy systems." },
+{ id: 3, speaker: "Speaker A", timestamp: "00:45", text: "Great. Does the API handle the Amharic character sets
+correctly now?" },
+{ id: 4, speaker: "Speaker B", timestamp: "00:55", text: "Awo, it works perfectly. We used the new UTF-8 standard across
+the database." },
+{ id: 5, speaker: "Speaker C", timestamp: "01:20", text: "I have a concern about the timeline. Are we still aiming for
+Q3 launch?" },
+{ id: 6, speaker: "Speaker A", timestamp: "01:35", text: "We need to be careful with scope creep. Let's stick to the MVP
+requirements first." },
+{ id: 7, speaker: "Speaker B", timestamp: "01:45", text: "Agreed. The mobile responsiveness is key for the field
+agents." },
+];
+
+const MOCK_MINUTES = `
+# Meeting Minutes: Infrastructure Review
+**Date:** Oct 24, 2025
+**Duration:** 45 mins (Processed: 5 mins)
+
+## Executive Summary
+The team reviewed the integration of legacy systems and confirmed that character encoding issues for local languages
+have been resolved. The timeline for Q3 is under review.
+
+## Key Decisions
+- **Encoding Standard:** Confirmed use of UTF-8 for all database entries to support Amharic.
+- **Legacy Integration:** Successfully completed initial merge.
+
+## Action Items
+- [ ] **Nathan** to review the Q3 timeline risks.
+- [ ] **Dev Team** to run final stress tests on the API.
+`;
+
+const RECENT_FILES = [
+{ id: 101, title: "Weekly Sync - Marketing", date: "Oct 22", duration: "45m", participants: ["NK", "EG"], color:
+"bg-blue-500" },
+{ id: 102, title: "Client Interview - Dashen", date: "Oct 20", duration: "12m", participants: ["NK", "AB"], color:
+"bg-emerald-500" },
+{ id: 103, title: "Q3 Roadmap Planning", date: "Oct 18", duration: "1h 30m", participants: ["NK", "ST", "JL"], color:
+"bg-purple-500" },
+{ id: 104, title: "UX Review: Mobile App", date: "Oct 15", duration: "25m", participants: ["NK", "Des"], color:
+"bg-pink-500" },
+];
+
+const LANGUAGES = [
+{ code: 'en', label: 'English' },
+{ code: 'am', label: 'Amharic' },
+{ code: 'mx', label: 'Mixed (Amharic/English)' },
+{ code: 'fr', label: 'French' },
+];
+
+/**
+* COMPONENT: AUDIO PLAYER
+* Responsive updates: Hides visualization on very small screens, adjusts padding.
+*/
+const AudioPlayer = () => (
+<div className={`p-3 md:p-4 ${theme.colors.surface} border-b ${theme.colors.border} flex items-center gap-2 md:gap-4
+    sticky top-0 z-10 shadow-sm`}>
+    <button className="p-2 rounded-full hover:bg-slate-100 text-slate-500 transition-colors hidden sm:block">
+        <SkipBack size={20} />
+    </button>
+    <button className={`p-3 md:p-4 rounded-full ${theme.colors.primary} ${theme.colors.primaryHover} text-white
+        shadow-lg hover:shadow-xl transition-all hover:scale-105 active:scale-95 shrink-0`}>
+        <Play size={20} fill="currentColor" className="ml-0.5 md:ml-1" />
+    </button>
+    <button className="p-2 rounded-full hover:bg-slate-100 text-slate-500 transition-colors hidden sm:block">
+        <SkipForward size={20} />
+    </button>
+
+    <div className="flex-1 mx-2 md:mx-4 flex flex-col justify-center overflow-hidden">
+        <div className="flex justify-between text-[10px] md:text-xs font-medium text-slate-400 mb-1 md:mb-2">
+            <span>00:00</span>
+            <span>05:00</span>
+        </div>
+        <div className="h-8 md:h-10 w-full flex items-center gap-0.5 md:gap-1 opacity-80 mask-gradient overflow-hidden">
+            {[...Array(50)].map((_, i) => (
+            <div key={i} className={`w-1 md:w-1.5 rounded-full ${i < 15 ? theme.colors.primary : 'bg-slate-200' }
+                transition-all duration-300`} style={{ height: `${30 + Math.random() * 70}%` }} />
+            ))}
+        </div>
+    </div>
+</div>
+);
+
+/**
+* COMPONENT: MEETING CARD (Grid View)
+*/
+const MeetingCard = ({ file, onClick }) => (
+<div onClick={onClick}
+    className="group bg-white rounded-2xl p-4 border border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer flex flex-col h-full relative overflow-hidden active:scale-98">
+    {/* "Cover Art" Background Pattern */}
+    <div className={`absolute top-0 right-0 w-32 h-32 ${file.color} opacity-5 rounded-full blur-2xl -mr-10 -mt-10
+        transition-opacity group-hover:opacity-10`}></div>
+
+    <div className="flex justify-between items-start mb-4 relative z-10">
+        <div className={`w-12 h-12 rounded-xl ${file.color} bg-opacity-10 text-${file.color.split('-')[1]}-600 flex
+            items-center justify-center`}>
+            <FileAudio size={24} />
+        </div>
+        <button className="text-slate-300 hover:text-slate-600 p-2 -mr-2 -mt-2">
+            <MoreVertical size={18} />
+        </button>
+    </div>
+
+    <h3
+        className="font-bold text-slate-800 text-lg leading-tight mb-2 group-hover:text-indigo-600 transition-colors line-clamp-2">
+        {file.title}
+    </h3>
+
+    <div className="flex items-center gap-2 text-xs text-slate-500 mb-4 font-medium">
+        <Clock size={14} /> {file.duration}
+        <span>•</span>
+        <Calendar size={14} /> {file.date}
+    </div>
+
+    <div className="mt-auto flex items-center -space-x-2 pt-2 border-t border-slate-50">
+        {file.participants.map((p, i) => (
+        <div key={i}
+            className="w-8 h-8 rounded-full bg-white border-2 border-white flex items-center justify-center text-xs font-bold text-slate-600 bg-slate-100 shadow-sm">
+            {p}
+        </div>
+        ))}
+    </div>
+</div>
+);
+
+/**
+* COMPONENT: UPLOAD MODAL
+*/
+const UploadModal = ({ onClose, onUpload }) => {
+const [step, setStep] = useState(1);
+const [progress, setProgress] = useState(0);
+
+const handleSimulateUpload = () => {
+setStep(3);
+let p = 0;
+const interval = setInterval(() => {
+p += 2;
+setProgress(p);
+if (p >= 100) {
+clearInterval(interval);
+onUpload();
+}
+}, 40);
+};
+
+return (
+<div
+    className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-0 md:p-4 animate-in fade-in duration-200">
+    <div className={`${theme.colors.surface} rounded-t-2xl md:rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden
+        flex flex-col max-h-[90vh] h-auto md:h-auto`}>
+        <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+            <h2 className="text-lg font-bold text-slate-800">New Session</h2>
+            <button onClick={onClose}>
+                <X size={20} className="text-slate-400 hover:text-slate-600" />
+            </button>
+        </div>
+
+        <div className="p-6 md:p-8 flex-1 overflow-y-auto">
+            {step === 1 && (
+            <div className="border-2 border-dashed border-indigo-200 rounded-2xl bg-indigo-50/30 p-8 md:p-12 text-center cursor-pointer hover:bg-indigo-50 transition-colors group"
+                onClick={()=> setStep(2)}
+                >
+                <div
+                    className="w-16 h-16 md:w-20 md:h-20 bg-white shadow-lg rounded-full flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-300">
+                    <UploadCloud size={28} className="text-indigo-600" />
+                </div>
+                <h3 className="text-xl md:text-2xl font-bold text-slate-800 mb-2">Upload Audio</h3>
+                <p className="text-slate-500 mb-6 text-sm md:text-base">Tap to browse files</p>
+                <div
+                    className="text-xs text-amber-700 bg-amber-50 inline-flex items-center gap-2 px-3 py-1.5 rounded-full font-medium">
+                    <AlertCircle size={12} /> Free Plan: 5 min limit
+                </div>
+            </div>
+            )}
+
+            {step === 2 && (
+            <div className="space-y-6 md:space-y-8">
+                <div className="flex items-center gap-4 p-4 border border-slate-200 rounded-xl bg-slate-50">
+                    <div
+                        className="w-10 h-10 md:w-12 md:h-12 bg-indigo-100 rounded-lg flex items-center justify-center text-indigo-600 shrink-0">
+                        <FileAudio size={24} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <p className="font-bold text-slate-900 truncate">Project_Alpha_Review.mp3</p>
+                        <p className="text-xs text-slate-500 font-mono">45.2 MB • 45:00</p>
+                    </div>
+                    <button className="text-slate-400 hover:text-red-500 p-2" onClick={()=> setStep(1)}>
+                        <X size={20} />
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Source
+                            Audio</label>
+                        <select
+                            className="w-full p-3 rounded-xl border border-slate-200 bg-white font-medium text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none">
+                            <option value="mx">🇪🇹 🇬🇧 Mixed (Amharic/English)</option>
+                            <option value="en">🇬🇧 English Only</option>
+                            <option value="am">🇪🇹 Amharic Only</option>
+                        </select>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Output
+                            Language</label>
+                        <select
+                            className="w-full p-3 rounded-xl border border-slate-200 bg-white font-medium text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none">
+                            <option value="en">🇬🇧 English (Standard)</option>
+                            <option value="am">🇪🇹 Amharic</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            )}
+
+            {step === 3 && (
+            <div className="text-center py-8 md:py-12">
+                <div className="w-20 h-20 md:w-24 md:h-24 mx-auto relative mb-6 md:mb-8">
+                    <svg className="w-full h-full rotate-[-90deg]" viewBox="0 0 100 100">
+                        <circle cx="50" cy="50" r="45" fill="none" stroke="#f1f5f9" strokeWidth="8" />
+                        <circle cx="50" cy="50" r="45" fill="none" stroke="#4f46e5" strokeWidth="8"
+                            strokeLinecap="round" strokeDasharray="283" strokeDashoffset={283 - (283 * progress / 100)}
+                            className="transition-all duration-300 ease-out" />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center flex-col">
+                        <span className="text-xl md:text-2xl font-bold text-slate-800">{Math.round(progress)}%</span>
+                    </div>
+                </div>
+                <h3 className="text-lg md:text-xl font-bold text-slate-900 animate-pulse">Processing Audio...</h3>
+            </div>
+            )}
+        </div>
+
+        {step === 2 && (
+        <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3 pb-8 md:pb-4">
+            <button className="px-4 py-2.5 text-slate-600 hover:bg-slate-200 rounded-xl font-medium"
+                onClick={onClose}>Cancel</button>
+            <button className={`px-6 py-2.5 ${theme.colors.primary} ${theme.colors.primaryHover} text-white rounded-xl
+                font-bold shadow-lg shadow-indigo-200 flex items-center gap-2 transform active:scale-95 transition-all`}
+                onClick={handleSimulateUpload}>
+                Start Transcription
+                <ChevronRight size={18} />
+            </button>
+        </div>
+        )}
+    </div>
+</div>
+);
+};
+
+/**
+* COMPONENT: MAIN APPLICATION
+*/
+export default function ElevateScribe() {
+const [view, setView] = useState('dashboard'); // dashboard, editor
+const [showUpload, setShowUpload] = useState(false);
+const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+const [viewMode, setViewMode] = useState('grid'); // grid, list
+const [activeMobileTab, setActiveMobileTab] = useState('transcript'); // transcript, minutes (Mobile Only)
+
+// App State
+const [transcript, setTranscript] = useState(MOCK_TRANSCRIPT);
+const [minutes, setMinutes] = useState(MOCK_MINUTES);
+
+const handleRenameSpeaker = (oldName, newName) => {
+if (!newName) return;
+const updated = transcript.map(t =>
+t.speaker === oldName ? { ...t, speaker: newName } : t
+);
+setTranscript(updated);
+};
+
+const Sidebar = () => (
+<div className={` fixed inset-y-0 left-0 z-30 w-64 ${theme.colors.sidebar} text-slate-400 transform transition-transform
+    duration-300 ease-in-out shadow-2xl ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full' } md:translate-x-0 flex
+    flex-col border-r border-slate-800/50 `}>
+    {/* Brand */}
+    <div className="h-20 flex items-center px-6">
+        <div className="flex items-center gap-3">
+            <div
+                className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-900/20">
+                <FileAudio className="text-white" size={20} />
+            </div>
+            <div>
+                <h1 className="font-bold text-white text-lg tracking-tight leading-none">Elevate</h1>
+                <span className="text-xs font-medium text-indigo-400 uppercase tracking-widest">Scribe</span>
+            </div>
+        </div>
+    </div>
+
+    {/* Nav */}
+    <nav className="flex-1 px-4 space-y-2 mt-4">
+        <button onClick={()=> { setView('dashboard'); setMobileMenuOpen(false); }}
+            className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all duration-200 font-medium
+            ${view === 'dashboard' ? 'bg-indigo-600/10 text-indigo-400' : 'hover:bg-slate-800/50
+            hover:text-slate-200'}`}
+            >
+            <LayoutTemplate size={20} /> Dashboard
+        </button>
+        <button
+            className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl hover:bg-slate-800/50 hover:text-slate-200 transition-all duration-200 font-medium">
+            <Clock size={20} /> History
+        </button>
+        <button
+            className="w-full flex items-center gap-3 px-4 py-3.5 rounded-xl hover:bg-slate-800/50 hover:text-slate-200 transition-all duration-200 font-medium">
+            <User size={20} /> Team
+        </button>
+    </nav>
+
+    {/* Freemium Widget */}
+    <div className="p-4 mb-safe-area">
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
+            <div className="flex justify-between items-center mb-3">
+                <span className="text-xs font-bold text-white uppercase tracking-wider">Free Plan</span>
+            </div>
+
+            <div className="mb-4 space-y-3">
+                <div>
+                    <div className="flex justify-between text-[10px] uppercase font-bold text-slate-500 mb-1">
+                        <span>Uploads</span>
+                        <span>1/1 Used</span>
+                    </div>
+                    <div className="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-emerald-500 h-full w-full"></div>
+                    </div>
+                </div>
+                <div>
+                    <div className="flex justify-between text-[10px] uppercase font-bold text-slate-500 mb-1">
+                        <span>Processing</span>
+                        <span>5m Limit</span>
+                    </div>
+                    <div className="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                        <div className="bg-indigo-500 h-full w-3/4"></div>
+                    </div>
+                </div>
+            </div>
+
+            <button
+                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors shadow-lg shadow-indigo-900/20">
+                Upgrade to Pro
+            </button>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3 px-2">
+            <div
+                className="h-8 w-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 font-bold text-xs shrink-0">
+                NG
+            </div>
+            <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-200 truncate">Nathan G.</p>
+                <p className="text-xs text-slate-500 truncate">nathan@wubsites.com</p>
+            </div>
+            <Settings size={16} className="text-slate-500 cursor-pointer hover:text-slate-300" />
+        </div>
+    </div>
+</div>
+);
+
+const TopBar = () => (
+<header className={`h-16 md:h-20 ${theme.colors.surface} border-b ${theme.colors.border} flex items-center
+    justify-between px-4 md:px-6 sticky top-0 z-20`}>
+    <div className="flex items-center gap-3 md:gap-4 flex-1 min-w-0">
+        <button className="md:hidden p-2 text-slate-600 -ml-2 hover:bg-slate-100 rounded-lg" onClick={()=>
+            setMobileMenuOpen(!mobileMenuOpen)}>
+            <Menu size={24} />
+        </button>
+
+        {view === 'editor' ? (
+        <div className="flex items-center gap-2 md:gap-3 overflow-hidden">
+            <button onClick={()=> setView('dashboard')}
+                className="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-500
+                transition-colors shrink-0"
+                >
+                <ArrowLeft size={20} className="md:hidden" />
+                <ChevronRight size={20} className="rotate-180 hidden md:block" />
+            </button>
+            <div className="min-w-0">
+                <h1 className="font-bold text-slate-800 text-base md:text-lg leading-tight truncate">Project Alpha
+                    Review</h1>
+                <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-[10px] md:text-xs text-slate-400 font-medium truncate">Oct 24 • 45m</span>
+                    <span
+                        className="hidden md:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-50 text-green-700 uppercase tracking-wide">
+                        Processed
+                    </span>
+                </div>
+            </div>
+        </div>
+        ) : (
+        <div className="relative hidden md:block w-96">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input type="text" placeholder="Search transcripts, minutes, or speakers..."
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-100 border-transparent focus:bg-white focus:border-indigo-300 focus:ring-4 focus:ring-indigo-100 outline-none text-sm transition-all" />
+        </div>
+        )}
+        {view === 'dashboard' && <h1 className="md:hidden font-bold text-lg text-slate-800 ml-1">Dashboard</h1>}
+    </div>
+
+    <div className="flex items-center gap-2 md:gap-3 pl-2">
+        {view === 'editor' && (
+        <>
+            <button
+                className="flex items-center gap-2 px-3 md:px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors">
+                <Share2 size={18} /> <span className="hidden lg:inline">Sync Docs</span>
+            </button>
+            <button className={`flex items-center gap-2 px-3 md:px-4 py-2 text-sm font-bold text-white
+                ${theme.colors.primary} ${theme.colors.primaryHover} rounded-xl shadow-md transition-transform
+                active:scale-95`}>
+                <Download size={18} /> <span className="hidden lg:inline">Export</span>
+            </button>
+        </>
+        )}
+        {view === 'dashboard' && (
+        <>
+            <button className="md:hidden p-2 text-slate-500 hover:bg-slate-100 rounded-lg">
+                <Search size={22} />
+            </button>
+            <button onClick={()=> setShowUpload(true)}
+                className={`flex items-center gap-2 px-3 md:px-4 py-2 md:py-2.5 ${theme.colors.primary}
+                ${theme.colors.primaryHover} text-white rounded-lg md:rounded-xl font-bold shadow-lg shadow-indigo-200
+                transition-all hover:-translate-y-0.5`}
+                >
+                <UploadCloud size={20} /> <span className="hidden md:inline">New Session</span>
+            </button>
+        </>
+        )}
+    </div>
+</header>
+);
+
+const DashboardView = () => (
+<div className={`p-4 md:p-10 max-w-7xl mx-auto space-y-6 md:space-y-10 ${theme.colors.background} min-h-full pb-20`}>
+
+    {/* Hero / Welcome Section */}
+    <div
+        className="relative overflow-hidden rounded-2xl md:rounded-3xl bg-gradient-to-r from-indigo-900 to-slate-900 text-white shadow-xl">
+        <div
+            className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full mix-blend-overlay filter blur-3xl opacity-20 -mr-16 -mt-16">
+        </div>
+        <div
+            className="absolute bottom-0 left-0 w-48 h-48 bg-purple-500 rounded-full mix-blend-overlay filter blur-3xl opacity-20 -ml-10 -mb-10">
+        </div>
+
+        <div className="relative z-10 p-6 md:p-10">
+            <h2 className="text-2xl md:text-3xl font-bold mb-2 font-serif tracking-tight">Good morning, Nathan</h2>
+            <p className="text-indigo-200 max-w-xl text-sm md:text-lg leading-relaxed">
+                You have 2 meetings from this week pending review.
+            </p>
+            <div className="mt-6 md:mt-8 flex gap-3 md:gap-4 overflow-x-auto pb-2 md:pb-0">
+                <button
+                    className="whitespace-nowrap px-4 md:px-5 py-2 md:py-2.5 bg-white text-slate-900 rounded-lg font-bold text-xs md:text-sm hover:bg-indigo-50 transition-colors shadow-lg">
+                    Review Pending
+                </button>
+                <button
+                    className="whitespace-nowrap px-4 md:px-5 py-2 md:py-2.5 bg-white/10 text-white rounded-lg font-bold text-xs md:text-sm hover:bg-white/20 transition-colors backdrop-blur-sm">
+                    View All Reports
+                </button>
+            </div>
+        </div>
+    </div>
+
+    {/* Library Section */}
+    <div>
+        <div className="flex justify-between items-center mb-4 md:mb-6">
+            <h3 className="text-lg md:text-xl font-bold text-slate-800 flex items-center gap-2">
+                <Clock size={20} className="text-slate-400" /> Recent Sessions
+            </h3>
+
+            <div className="hidden md:flex bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
+                <button onClick={()=> setViewMode('grid')}
+                    className={`p-2 rounded-md transition-all ${viewMode === 'grid' ? 'bg-indigo-100 text-indigo-600
+                    shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                    >
+                    <Grid size={18} />
+                </button>
+                <button onClick={()=> setViewMode('list')}
+                    className={`p-2 rounded-md transition-all ${viewMode === 'list' ? 'bg-indigo-100 text-indigo-600
+                    shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                    >
+                    <List size={18} />
+                </button>
+            </div>
+        </div>
+
+        <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6
+            ${viewMode==='list' ? 'hidden' : '' }`}>
+            {RECENT_FILES.map((file) => (
+            <MeetingCard key={file.id} file={file} onClick={()=> setView('editor')} />
+                ))}
+        </div>
+    </div>
+</div>
+);
+
+const EditorView = () => (
+<div className="flex flex-col h-[calc(100vh-4rem)] md:h-[calc(100vh-5rem)] bg-white">
+    <AudioPlayer />
+
+    {/* Mobile Tab Switcher */}
+    <div className="lg:hidden flex border-b border-slate-200 bg-white sticky top-[60px] z-10">
+        <button onClick={()=> setActiveMobileTab('transcript')}
+            className={`flex-1 py-3 text-sm font-bold border-b-2 transition-colors ${activeMobileTab === 'transcript' ?
+            'text-indigo-600 border-indigo-600 bg-indigo-50/50' : 'text-slate-500 border-transparent'}`}
+            >
+            Transcript
+        </button>
+        <button onClick={()=> setActiveMobileTab('minutes')}
+            className={`flex-1 py-3 text-sm font-bold border-b-2 transition-colors ${activeMobileTab === 'minutes' ?
+            'text-amber-700 border-amber-500 bg-amber-50/50' : 'text-slate-500 border-transparent'}`}
+            >
+            Smart Minutes
+        </button>
+    </div>
+
+    <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+        {/* Transcript Column */}
+        <div className={`${activeMobileTab==='transcript' ? 'flex' : 'hidden' } lg:flex flex-1 border-r border-slate-200
+            bg-white flex-col min-h-0 h-full`}>
+            <div
+                className="px-4 md:px-6 py-3 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
+                <h3 className="font-bold text-slate-600 text-xs uppercase tracking-widest flex items-center gap-2">
+                    <Languages size={14} /> Transcript
+                </h3>
+                <div className="flex gap-2">
+                    <button className="text-xs font-medium text-indigo-600 hover:underline">Download</button>
+                </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+                {transcript.map((item) => (
+                <div key={item.id} className="group flex gap-3 md:gap-4">
+                    <div className="flex-shrink-0 w-8 pt-1">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold
+                            ${item.speaker==="Speaker A" ? "bg-blue-100 text-blue-700" : item.speaker==="Speaker B"
+                            ? "bg-purple-100 text-purple-700" : "bg-orange-100 text-orange-700" }`}>
+                            {item.speaker.split(' ')[1]}
+                        </div>
+                    </div>
+                    <div className="flex-1">
+                        <div className="flex items-baseline gap-2 mb-1">
+                            <span
+                                className="text-xs font-bold text-slate-700 cursor-pointer hover:text-indigo-600 transition-colors"
+                                onClick={()=> {
+                                const newName = prompt("Rename Speaker:", item.speaker);
+                                handleRenameSpeaker(item.speaker, newName);
+                                }}
+                                >
+                                {item.speaker}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-mono">{item.timestamp}</span>
+                        </div>
+                        <p className="text-slate-800 leading-relaxed text-sm">
+                            {item.text}
+                        </p>
+                    </div>
+                </div>
+                ))}
+                <div className="h-20" /> {/* Spacer for mobile scroll */}
+            </div>
+        </div>
+
+        {/* Minutes Column */}
+        <div className={`${activeMobileTab==='minutes' ? 'flex' : 'hidden' } lg:flex flex-1 flex-col min-h-0 h-full
+            bg-[#fdfbf7]`}>
+            <div
+                className="px-4 md:px-6 py-3 border-b border-[#eeeae4] flex justify-between items-center bg-[#fbf9f4] shrink-0">
+                <h3 className="font-bold text-amber-900/60 text-xs uppercase tracking-widest flex items-center gap-2">
+                    <Sparkles size={14} /> Smart Minutes
+                </h3>
+                <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">READ
+                    MODE</span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 md:p-8 lg:p-12 font-serif">
+                <div className="max-w-2xl mx-auto h-full">
+                    <textarea
+                        className="w-full h-full bg-transparent resize-none outline-none text-slate-800 leading-7 md:leading-8 text-base md:text-lg placeholder-slate-300 selection:bg-amber-100 pb-20"
+                        value={minutes} onChange={(e)=> setMinutes(e.target.value)}
+                spellCheck="false"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className={`flex h-screen ${theme.colors.background} font-sans text-slate-900 selection:bg-indigo-100 selection:text-indigo-900 overflow-hidden`}>
+      <Sidebar />
+      
+      {/* Mobile Overlay */}
+      {mobileMenuOpen && (
+        <div 
+          className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40 md:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      <div className="flex-1 ml-0 md:ml-64 flex flex-col transition-all duration-300 relative z-0 h-full">
+        <TopBar />
+        <main className="flex-1 overflow-y-auto scroll-smooth w-full">
+          {view === 'dashboard' ? <DashboardView /> : <EditorView />}
+        </main>
+      </div>
+
+      {showUpload && (
+        <UploadModal 
+          onClose={() => setShowUpload(false)} 
+          onUpload={() => {
+            setShowUpload(false);
+            setView('editor');
+          }} 
+        />
+      )}
+    </div>
+  );
+}
