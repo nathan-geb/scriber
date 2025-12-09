@@ -1,6 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma, MeetingStatus } from '@prisma/client';
+import { unlink } from 'fs/promises';
+import { existsSync } from 'fs';
 
 export interface MeetingFilters {
   search?: string;
@@ -104,10 +106,13 @@ export class MeetingsService {
     return meeting;
   }
 
+  private readonly logger = new Logger(MeetingsService.name);
+
   async delete(id: string, userId: string) {
-    // Verify ownership
+    // Verify ownership and get file path
     const meeting = await this.prisma.meeting.findFirst({
       where: { id, userId },
+      select: { id: true, fileUrl: true },
     });
 
     if (!meeting) throw new NotFoundException('Meeting not found');
@@ -120,7 +125,26 @@ export class MeetingsService {
       this.prisma.meeting.delete({ where: { id } }),
     ]);
 
+    // Clean up the audio file from disk (non-blocking, log errors)
+    if (meeting.fileUrl) {
+      void this.cleanupFile(meeting.fileUrl);
+    }
+
     return { deleted: true };
+  }
+
+  /**
+   * Safely delete a file from disk. Logs errors but doesn't throw.
+   */
+  private async cleanupFile(filePath: string): Promise<void> {
+    try {
+      if (existsSync(filePath)) {
+        await unlink(filePath);
+        this.logger.log(`Deleted file: ${filePath}`);
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to delete file ${filePath}:`, error);
+    }
   }
 
   async deleteMany(ids: string[], userId: string) {
@@ -136,13 +160,13 @@ export class MeetingsService {
     // But manual cleanup for multiple IDs is tricky in one go without complex queries.
     // If we trust schema cascading or perform separate deletes:
 
-    // Simplest: Find all IDs owned by user
+    // Find all meetings owned by user with their file paths
     const meetings = await this.prisma.meeting.findMany({
       where: {
         id: { in: ids },
         userId
       },
-      select: { id: true }
+      select: { id: true, fileUrl: true }
     });
 
     const validIds = meetings.map(m => m.id);
@@ -156,6 +180,13 @@ export class MeetingsService {
       this.prisma.speaker.deleteMany({ where: { meetingId: { in: validIds } } }),
       this.prisma.meeting.deleteMany({ where: { id: { in: validIds } } }),
     ]);
+
+    // Clean up audio files from disk (non-blocking)
+    for (const meeting of meetings) {
+      if (meeting.fileUrl) {
+        void this.cleanupFile(meeting.fileUrl);
+      }
+    }
 
     return { count: validIds.length };
   }

@@ -146,8 +146,15 @@ export class JobsService {
 
   /**
    * Retry a failed/stuck job by re-adding it to the queue
+   * Also resets the meeting status to UPLOADED
    */
   async retryJob(meetingId: string, userId: string): Promise<Job> {
+    // Reset meeting status to UPLOADED to restart the pipeline
+    await this.prisma.meeting.update({
+      where: { id: meetingId },
+      data: { status: 'UPLOADED' },
+    });
+
     // Re-add transcription job
     return this.addTranscriptionJob({ meetingId, userId });
   }

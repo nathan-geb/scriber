@@ -25,10 +25,10 @@ export class SharesService {
         // Generate unique token
         const token = randomBytes(32).toString('hex');
 
-        // Calculate expiration
-        const expiresAt = expiresIn
-            ? new Date(Date.now() + expiresIn * 60 * 60 * 1000)
-            : null;
+        // Calculate expiration (default: 30 days if not specified)
+        const DEFAULT_EXPIRY_HOURS = 30 * 24; // 30 days
+        const expiryHours = expiresIn ?? DEFAULT_EXPIRY_HOURS;
+        const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
 
         return this.prisma.shareLink.create({
             data: {

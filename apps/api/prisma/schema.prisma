@@ -98,6 +98,9 @@ model Meeting {
   speakers             Speaker[]
   transcript           TranscriptSegment[]
   keyMoments           KeyMoment[]
+
+  @@index([userId, createdAt])
+  @@index([status])
 }
 
 model KeyMoment {
@@ -136,6 +139,8 @@ model TranscriptSegment {
   speaker       Speaker?              @relation(fields: [speakerId], references: [id])
   corrections   TranscriptCorrection[]
   edits         SegmentEdit[]
+
+  @@index([meetingId, startTime])
 }
 
 model TranscriptCorrection {
@@ -237,6 +242,8 @@ model Notification {
   meetingId String?
   createdAt DateTime         @default(now())
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
 }
 
 model ShareLink {

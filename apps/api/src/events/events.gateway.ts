@@ -14,6 +14,7 @@ import { JwtService } from '@nestjs/jwt';
 @WebSocketGateway({
   cors: {
     origin: [
+      'http://localhost:3000',
       'http://localhost:3001',
       'http://localhost:8081',
       'http://localhost:19006',
@@ -40,13 +41,19 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       if (!token) {
         this.logger.warn(`Client ${client.id} connected without auth token`);
-        // Allow connection but don't associate with user
+        // Give a 5-second grace period for late authentication, then disconnect
+        setTimeout(() => {
+          if (!client.data?.userId) {
+            this.logger.warn(`Disconnecting unauthenticated client ${client.id}`);
+            client.disconnect(true);
+          }
+        }, 5000);
         return;
       }
 
       // Verify JWT and extract userId
       const payload = this.jwtService.verify(token as string);
-      const userId = payload.sub;
+      const userId = payload.sub as string;
 
       // Store socket-to-user mapping
       client.data.userId = userId;
@@ -58,11 +65,13 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.userSockets.get(userId)!.add(client.id);
 
       // Join user-specific room
-      client.join(`user:${userId}`);
+      void client.join(`user:${userId}`);
 
       this.logger.log(`Client ${client.id} connected for user ${userId}`);
     } catch (error) {
       this.logger.error(`Failed to authenticate socket ${client.id}:`, error);
+      // Disconnect on auth failure
+      client.disconnect(true);
     }
   }
 

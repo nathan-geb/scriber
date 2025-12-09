@@ -7,8 +7,10 @@ import {
     Body,
     UseGuards,
     Request,
+    BadRequestException,
 } from '@nestjs/common';
 import { IsString, IsOptional, IsNumber, IsIn } from 'class-validator';
+import { Throttle } from '@nestjs/throttler';
 import { SharesService } from './shares.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -31,10 +33,22 @@ export class SharesController {
 
     @Post()
     @UseGuards(JwtAuthGuard)
+    @Throttle({ default: { limit: 10, ttl: 60000 } }) // Max 10 requests per minute
     async createShareLink(
         @Request() req: { user: { userId: string } },
         @Body() dto: CreateShareLinkDto,
     ) {
+        // Check max shares per meeting (10 limit)
+        const existingLinks = await this.sharesService.getShareLinks(
+            req.user.userId,
+            dto.meetingId,
+        );
+        if (existingLinks.length >= 10) {
+            throw new BadRequestException(
+                'Maximum share links (10) reached for this meeting. Please revoke an existing link first.',
+            );
+        }
+
         const shareLink = await this.sharesService.createShareLink(
             req.user.userId,
             dto.meetingId,
@@ -43,7 +57,7 @@ export class SharesController {
         );
 
         // Return the full share URL
-        const baseUrl = process.env.WEB_URL || 'http://localhost:3001';
+        const baseUrl = process.env.WEB_URL || 'http://localhost:3000';
         return {
             ...shareLink,
             shareUrl: `${baseUrl}/share/${shareLink.token}`,

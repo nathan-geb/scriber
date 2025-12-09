@@ -137,7 +137,6 @@ export class UploadsService {
       message: 'File uploaded and transcription started',
       meetingId: meeting.id,
       jobId: job.id,
-      path: file.path,
       duration: durationSeconds,
     };
   }

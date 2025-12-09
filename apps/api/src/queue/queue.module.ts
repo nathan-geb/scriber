@@ -8,6 +8,7 @@ import { TranscriptionsModule } from '../transcriptions/transcriptions.module';
 import { MinutesModule } from '../minutes/minutes.module';
 import { EventsModule } from '../events/events.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { UsageModule } from '../usage/usage.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { PrismaModule } from '../prisma/prisma.module';
     forwardRef(() => MinutesModule),
     EventsModule,
     PrismaModule,
+    UsageModule,
   ],
   controllers: [JobsController],
   providers: [TranscriptionProcessor, MinutesProcessor, JobsService],

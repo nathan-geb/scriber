@@ -4,6 +4,8 @@ import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { TranscriptionsService } from '../transcriptions/transcriptions.service';
 import { EventsGateway } from '../events/events.gateway';
 import { JobsService } from './jobs.service';
+import { UsageService } from '../usage/usage.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 export interface TranscriptionJobData {
   meetingId: string;
@@ -19,6 +21,8 @@ export class TranscriptionProcessor extends WorkerHost {
     private readonly eventsGateway: EventsGateway,
     @Inject(forwardRef(() => JobsService))
     private readonly jobsService: JobsService,
+    private readonly usageService: UsageService,
+    private readonly prisma: PrismaService,
   ) {
     super();
   }
@@ -74,6 +78,19 @@ export class TranscriptionProcessor extends WorkerHost {
         progress: 0,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
+
+      // Refund usage quota on failure
+      try {
+        const meeting = await this.prisma.meeting.findUnique({
+          where: { id: meetingId },
+          select: { durationSeconds: true },
+        });
+        if (meeting?.durationSeconds) {
+          await this.usageService.decrementUsage(userId, meeting.durationSeconds);
+        }
+      } catch (usageError) {
+        console.error('Failed to decrement usage on transcription failure:', usageError);
+      }
 
       throw error;
     }
