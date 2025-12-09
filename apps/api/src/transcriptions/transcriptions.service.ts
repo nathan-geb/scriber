@@ -88,74 +88,71 @@ export class TranscriptionsService {
       });
 
       const result = await model.generateContent([
-        `### ROLE
-You are a strict, JSON-first multilingual transcription engine for a business SaaS platform. Your output dictates the application's UI. Accuracy, formatting consistency, and schema compliance are critical.
+        `You are a professional audio transcription engine. Transcribe the ENTIRE audio file from beginning to end.
 
-### INPUT CONTEXT
-- Audio: Business meeting with mixed languages (Amharic/English code-switching).
-- Goal: Verbatim transcription for future speaker merging and automated minute generation.
+## CRITICAL REQUIREMENTS
 
-### LINGUISTIC RULES (The "Amharish" Protocol)
-1. **Script Preservation:**
-   - Spoken English → Latin Script.
-   - Spoken Amharic → Ge'ez Script.
-   - **Mixed Morphology (CRITICAL):** If an English root word has Amharic grammatical suffixes, use the script of the suffix for the suffix ONLY, or phonetically transcribe the whole distinct sound in Ge'ez if it flows better.
-     - *Preference:* "File-u" (English root, Amharic suffix) → "File-u" or "ፋይሉ" (Context dependent, but preserve the English root if distinct).
-     - *Hard Rule:* NEVER write full English sentences in Ge'ez. NEVER write full Amharic sentences in Latin.
+1. **COMPLETE TRANSCRIPTION**: You MUST transcribe the ENTIRE audio from 0:00 to the very end. Do NOT stop early. If the audio is 4 minutes long, your last segment's endTime should be near 240 seconds.
 
-2. **Data Normalization:**
-   - **Numbers:** Always transcribe numbers as digits (e.g., "2000 birr", "Project 5") unless used metaphorically ("one of a kind").
-   - **Dates/Times:** Use standard formats if spoken naturally (e.g., "May 24th", "2:00 PM").
+2. **TIMESTAMP FORMAT**: All timestamps must be in SECONDS as decimal numbers.
+   - CORRECT: 65.5 (meaning 1 minute 5.5 seconds)
+   - WRONG: 1.05 (this is NOT how to represent 1 minute 5 seconds)
+   - For 2 minutes 30 seconds, use: 150.0
+   - For 45 seconds, use: 45.0
 
-### STRUCTURAL RULES
-1. **Diarization (FIFO Strategy):**
-   - Assign \`speakerId\` sequentially based on first appearance: \`spk_1\` is the first voice heard, \`spk_2\` is the second.
-   - **Naming:** Only use a real name in \`speakerLabel\` if the evidence is explicit (Self-intro or Direct Address). Otherwise, use "Unknown 1".
+3. **TIMESTAMP RULES**:
+   - startTime must ALWAYS be less than endTime
+   - Each segment's startTime should be >= previous segment's endTime
+   - Timestamps must be sequential and cover the entire audio duration
 
-2. **Segmentation & Timestamping:**
-   - **Duration Cap:** No segment may exceed 20 seconds. Force a split at a sentence boundary if a speaker talks longer.
-   - **No Overlaps:** \`startTime\` must be < \`endTime\`. If speakers overlap, serialize the text: transcribe Speaker A, then Speaker B.
-   - **Gap Handling:** If audio is completely unclear, insert a segment with text \`[inaudible]\` and the corresponding timestamp.
+## SPEAKER IDENTIFICATION
 
-### OUTPUT FORMAT
-- Return **ONLY** a raw JSON array.
-- No markdown formatting (no \`\`\`json blocks).
-- No preamble or explanation.
+- Assign speakerId sequentially: spk_1, spk_2, spk_3, etc.
+- Use real names for speakerLabel ONLY if explicitly stated in the audio (self-introduction or direct address)
+- Otherwise use "Unknown 1", "Unknown 2", etc.
+- Set nameConfidence: 0.9+ if name is clear, 0.0 if unknown
 
-**Schema:**
+## LANGUAGE HANDLING
+
+This audio may contain multiple languages (English, Amharic, or mixed):
+- English → Use Latin script
+- Amharic → Use Ge'ez script (ግዕዝ)
+- Code-switching is common - preserve the original language in its native script
+- Record all languages used in each segment in the languagesUsed array: ["en"], ["am"], or ["en", "am"]
+
+## SEGMENTATION RULES
+
+- Maximum segment length: 20 seconds
+- Split at natural sentence boundaries
+- If audio is unclear, use text: "[inaudible]"
+- If there's silence, you may skip it but maintain accurate timestamps
+
+## OUTPUT FORMAT
+
+Return ONLY a valid JSON array. No markdown, no explanation, no preamble.
+
 [
   {
     "speakerId": "spk_1",
-    "speakerLabel": "string (Name or 'Unknown X')",
-    "text": "string (Verbatim content)",
-    "startTime": float (seconds, 2 decimal places),
-    "endTime": float (seconds, 2 decimal places),
-    "languagesUsed": ["code1", "code2"],
-    "nameConfidence": float (0.0 to 1.0; set to 0.0 if Unknown)
-  }
-]
-
-**Example Output:**
-[
-  {
-    "speakerId": "spk_1",
-    "speakerLabel": "Nathan",
-    "text": "Okay, let's look at the budget. ለእዚህ project 50,000 birr ያስፈልጋል።",
+    "speakerLabel": "Unknown 1",
+    "text": "Hello everyone, welcome to the meeting.",
     "startTime": 0.0,
-    "endTime": 5.45,
-    "languagesUsed": ["en", "am"],
-    "nameConfidence": 0.98
+    "endTime": 3.5,
+    "languagesUsed": ["en"],
+    "nameConfidence": 0.0
   },
   {
     "speakerId": "spk_2",
-    "speakerLabel": "Unknown 1",
-    "text": "That sounds reasonable.",
-    "startTime": 5.5,
-    "endTime": 7.12,
+    "speakerLabel": "Dr. Sarah",
+    "text": "Thank you. Let's begin with the agenda.",
+    "startTime": 3.8,
+    "endTime": 6.2,
     "languagesUsed": ["en"],
-    "nameConfidence": 0.0
+    "nameConfidence": 0.95
   }
-]`,
+]
+
+Remember: Transcribe the COMPLETE audio. Your final segment's endTime should match the audio's total duration.`,
         {
           fileData: {
             mimeType,
@@ -215,11 +212,29 @@ You are a strict, JSON-first multilingual transcription engine for a business Sa
           });
         }
 
+        // Validate and correct timestamps
+        const startTime = segment.startTime || 0;
+        let endTime = segment.endTime || 0;
+
+        // Fix invalid timestamps where endTime < startTime
+        // This can happen when AI outputs minutes.seconds format (e.g., 1.09 meaning 1 min 9 sec = 69 sec)
+        if (endTime < startTime && endTime < 10) {
+          // Likely minutes.seconds format - convert to pure seconds
+          const mins = Math.floor(endTime);
+          const secs = (endTime % 1) * 100;
+          endTime = mins * 60 + secs;
+        }
+
+        // If still invalid, set endTime to startTime + estimated duration
+        if (endTime <= startTime) {
+          endTime = startTime + 5; // Default 5 second segment
+        }
+
         await this.prisma.transcriptSegment.create({
           data: {
             meetingId: meeting.id,
-            startTime: segment.startTime || 0,
-            endTime: segment.endTime || 0,
+            startTime,
+            endTime,
             text: segment.text,
             speakerId: speaker.id,
             languagesUsed: languagesUsed,

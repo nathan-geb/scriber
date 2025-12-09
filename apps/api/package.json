@@ -32,6 +32,8 @@
     "@nestjs/throttler": "^6.5.0",
     "@nestjs/websockets": "^11.1.9",
     "@prisma/client": "6.19.0",
+    "@sentry/nestjs": "^10.29.0",
+    "@sentry/profiling-node": "^10.29.0",
     "@types/bcrypt": "^6.0.0",
     "@types/multer": "^2.0.0",
     "@types/nodemailer": "^7.0.4",

@@ -1,3 +1,6 @@
+// Sentry must be initialized before any other imports
+import './instrument';
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
@@ -47,5 +50,8 @@ async function bootstrap() {
 
   logger.log(`🚀 Application is running on: http://localhost:${port}`);
   logger.log(`📚 API docs available at: http://localhost:${port}/api/docs`);
+  if (process.env.SENTRY_DSN) {
+    logger.log(`📊 Sentry error tracking enabled`);
+  }
 }
 void bootstrap();

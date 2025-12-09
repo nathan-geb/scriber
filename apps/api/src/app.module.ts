@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
+import { SentryModule } from '@sentry/nestjs/setup';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { UploadsModule } from './uploads/uploads.module';
@@ -25,6 +26,8 @@ import { TemplatesModule } from './templates/templates.module';
 
 @Module({
   imports: [
+    // Sentry must be first for proper error capturing
+    SentryModule.forRoot(),
     // Rate limiting - default 100 requests per minute
     ThrottlerModule.forRoot([
       {

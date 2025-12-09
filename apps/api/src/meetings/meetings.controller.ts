@@ -94,22 +94,37 @@ export class MeetingsController {
     // Resolve file path - fileUrl can be:
     // 1. Absolute path starting with /
     // 2. Relative path from project root (e.g., apps/api/uploads/file.m4a or ./apps/api/uploads/file.m4a)
-    // 3. Just filename (legacy), assumed to be in uploads folder
-    let filePath: string;
+    // 3. Relative path from API folder (e.g., uploads/file.webm or ./uploads/file.webm)
+    // 4. Just filename (legacy), check multiple possible locations
+    let filePath: string = '';
+
     if (meeting.fileUrl.startsWith('/')) {
+      // Absolute path
       filePath = meeting.fileUrl;
     } else if (meeting.fileUrl.startsWith('./apps/') || meeting.fileUrl.startsWith('apps/')) {
-      // Multer relative path - resolve from monorepo root (cwd parent parent for apps/api)
-      // cwd() is typically /path/to/Scriber/apps/api
-      // We need to go up 2 levels to get to /path/to/Scriber
-      const cleanPath = meeting.fileUrl.replace(/^\.\//, ''); // Remove leading ./
+      // Full relative path from monorepo root
+      const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
       filePath = join(process.cwd(), '..', '..', cleanPath);
+    } else if (meeting.fileUrl.startsWith('./uploads/') || meeting.fileUrl.startsWith('uploads/')) {
+      // Relative path from API folder (new format from fixed multer config)
+      const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
+      filePath = join(process.cwd(), cleanPath);
     } else {
-      // Just filename, use local uploads folder
-      filePath = join(process.cwd(), 'uploads', meeting.fileUrl);
+      // Just filename - check multiple possible locations
+      const possiblePaths = [
+        join(process.cwd(), 'uploads', meeting.fileUrl),                    // ./uploads/
+        join(process.cwd(), 'apps', 'api', 'uploads', meeting.fileUrl),     // ./apps/api/uploads/ (legacy nested)
+      ];
+
+      for (const path of possiblePaths) {
+        if (existsSync(path)) {
+          filePath = path;
+          break;
+        }
+      }
     }
 
-    if (!existsSync(filePath)) {
+    if (!filePath || !existsSync(filePath)) {
       throw new NotFoundException('Audio file not found on disk');
     }
 

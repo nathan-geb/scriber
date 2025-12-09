@@ -15,7 +15,7 @@ import { QueueModule } from '../queue/queue.module';
     QueueModule,
     MulterModule.register({
       storage: diskStorage({
-        destination: './apps/api/uploads',
+        destination: './uploads',
         filename: (req, file, callback) => {
           const uniqueSuffix =
             Date.now() + '-' + Math.round(Math.random() * 1e9);
