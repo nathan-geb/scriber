@@ -95,4 +95,53 @@ export class UsersService {
       data: { isActive }
     });
   }
+
+  async createOrUpdateGoogleUser(email: string, name: string): Promise<User> {
+    const existing = await this.prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (existing) {
+      // If user exists but has no name, update it
+      if (!existing.name) {
+        return this.prisma.user.update({
+          where: { id: existing.id },
+          data: { name },
+        });
+      }
+      return existing;
+    }
+
+    // Create new user with Free plan
+    const freePlan = await this.prisma.plan.findUnique({
+      where: { name: 'Free' },
+    });
+    // Fallback if seeded data is missing, though unlikely
+    const planId = freePlan?.id;
+
+    if (!planId) {
+      // This is a critical error if plans aren't seeded, but we can't block login.
+      // In real app, we might throw or create a plan. Here we throw.
+      throw new Error('Default plan not found. Please contact support.');
+    }
+
+    return this.prisma.user.create({
+      data: {
+        email,
+        name,
+        // No password for OAuth users
+        subscription: {
+          create: {
+            planId,
+          },
+        },
+        notificationSettings: {
+          create: {
+            email: true,
+            push: true,
+          },
+        },
+      },
+    });
+  }
 }

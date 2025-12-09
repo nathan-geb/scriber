@@ -75,24 +75,79 @@ export class UploadsService {
     }
   }
 
-  private async extractAudioDuration(filePath: string): Promise<number> {
+  /**
+   * Extract audio duration with multiple fallback strategies:
+   * 1. music-metadata (works for most formats)
+   * 2. ffprobe (fallback for WebM and other edge cases, if available)
+   * 3. Client-provided duration (last resort)
+   */
+  private async extractAudioDuration(
+    filePath: string,
+    clientDuration?: number,
+  ): Promise<number> {
+    // Try 1: music-metadata
     try {
       const metadata = await parseFile(filePath);
       const durationSeconds = Math.ceil(metadata.format.duration || 0);
-      return durationSeconds > 0 ? durationSeconds : 300; // Fallback to 5 min
+      if (durationSeconds > 0) {
+        return durationSeconds;
+      }
     } catch (error) {
-      console.warn('Could not extract audio duration:', error);
-      return 300; // Default 5 min estimate
+      console.warn('music-metadata failed:', error);
     }
+
+    // Try 2: ffprobe (better for WebM files) - check if available first
+    try {
+      const { exec } = await import('child_process');
+      const { promisify } = await import('util');
+      const execAsync = promisify(exec);
+
+      // Check if ffprobe is available
+      try {
+        await execAsync('which ffprobe || where ffprobe 2>/dev/null');
+      } catch {
+        // ffprobe not installed, skip this method
+        console.log('ffprobe not available, skipping');
+        throw new Error('ffprobe not available');
+      }
+
+      const { stdout } = await execAsync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      );
+      const duration = parseFloat(stdout.trim());
+      if (!isNaN(duration) && duration > 0) {
+        return Math.ceil(duration);
+      }
+    } catch (error) {
+      // Only log if it's not the "not available" error
+      if ((error as Error).message !== 'ffprobe not available') {
+        console.warn('ffprobe fallback failed:', error);
+      }
+    }
+
+    // Try 3: Use client-provided duration if available
+    if (clientDuration && clientDuration > 0) {
+      console.log(`Using client-provided duration: ${clientDuration}s`);
+      return Math.ceil(clientDuration);
+    }
+
+    // Final fallback: estimate 5 minutes
+    console.warn('All duration extraction methods failed, using 300s default');
+    return 300;
   }
+
 
   async handleFileUpload(
     file: Express.Multer.File,
     user: { userId: string },
     languageCode?: string,
+    clientDuration?: number,
   ) {
-    // Extract actual duration from audio file
-    const durationSeconds = await this.extractAudioDuration(file.path);
+    // Extract actual duration from audio file (with client fallback for WebM)
+    const durationSeconds = await this.extractAudioDuration(
+      file.path,
+      clientDuration,
+    );
 
     // Check usage limits before proceeding
     await this.usageService.enforceUploadLimit(user.userId, durationSeconds);

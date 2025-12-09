@@ -145,10 +145,68 @@ export class JobsService {
   }
 
   /**
-   * Retry a failed/stuck job by re-adding it to the queue
-   * Also resets the meeting status to UPLOADED
+   * Retry a failed/stuck job by re-adding it to the queue.
+   * Smart retry: checks what stage failed and retries appropriately.
    */
-  async retryJob(meetingId: string, userId: string): Promise<Job> {
+  async retryJob(
+    meetingId: string,
+    userId: string,
+  ): Promise<Job | { success: boolean; message: string }> {
+    // Get meeting with transcript info to determine failure stage
+    const meeting = await this.prisma.meeting.findUnique({
+      where: { id: meetingId },
+      include: {
+        transcript: { take: 1 }, // Just check if any transcript exists
+        minutes: true,
+      },
+    });
+
+    if (!meeting) {
+      return { success: false, message: 'Meeting not found' };
+    }
+
+    const hasTranscript = meeting.transcript && meeting.transcript.length > 0;
+    const hasMinutes = meeting.minutes !== null;
+
+    if (hasTranscript && !hasMinutes) {
+      // Transcript exists but minutes failed - retry minutes only
+      await this.prisma.meeting.update({
+        where: { id: meetingId },
+        data: { status: 'TRANSCRIPT_READY' },
+      });
+      return this.addMinutesJob({
+        meetingId,
+        userId,
+        template: 'EXECUTIVE', // Default template for retry
+      });
+    }
+
+    if (hasTranscript && hasMinutes) {
+      // Both exist - meeting is actually complete, just fix status
+      await this.prisma.meeting.update({
+        where: { id: meetingId },
+        data: { status: 'COMPLETED' },
+      });
+      return { success: true, message: 'Meeting was already complete, status fixed' };
+    }
+
+    // No transcript - need to re-process from beginning
+
+    // Check if file still exists
+    if (meeting.fileUrl) {
+      const fs = require('fs');
+      const path = require('path');
+      let filePath = meeting.fileUrl;
+      if (!path.isAbsolute(filePath)) {
+        filePath = path.join(process.cwd(), filePath);
+      }
+      if (!fs.existsSync(filePath)) {
+        return { success: false, message: 'FILE_MISSING' };
+      }
+    } else {
+      return { success: false, message: 'FILE_MISSING' };
+    }
+
     // Reset meeting status to UPLOADED to restart the pipeline
     await this.prisma.meeting.update({
       where: { id: meetingId },

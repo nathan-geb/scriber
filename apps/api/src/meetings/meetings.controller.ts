@@ -223,11 +223,18 @@ export class MeetingsController {
       return { success: false, message: 'Only failed meetings can be retried' };
     }
 
-    const job = await this.jobsService.retryJob(id, req.user.userId);
+    const result = await this.jobsService.retryJob(id, req.user.userId);
+
+    // Check if result is already a status object (smart retry can return early)
+    if ('success' in result) {
+      return result;
+    }
+
+    // Otherwise it's a Job
     return {
       success: true,
       message: 'Job restarted',
-      jobId: job.id,
+      jobId: result.id,
     };
   }
 }

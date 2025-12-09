@@ -4,6 +4,7 @@ import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventsGateway } from '../events/events.gateway';
+import { withGeminiRetry } from '../common/gemini-retry';
 import * as path from 'path';
 
 @Injectable()
@@ -44,6 +45,79 @@ export class TranscriptionsService {
     }, 3000); // Every 3 seconds
   }
 
+  /**
+   * Normalize and validate transcript segments:
+   * - Sort by startTime
+   * - Fix invalid timestamp ranges
+   * - Clamp to audio duration
+   * - Log quality issues
+   */
+  private normalizeSegments(
+    segments: any[],
+    maxDuration: number,
+  ): { segments: any[]; hasQualityIssues: boolean } {
+    if (!segments?.length) return { segments, hasQualityIssues: false };
+
+    // Sort by startTime
+    segments.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+
+    let hasQualityIssues = false;
+    let prevEndTime = 0;
+
+    const normalized = segments.map((seg, i) => {
+      let startTime = seg.startTime ?? 0;
+      let endTime = seg.endTime ?? startTime + 5;
+
+      // Fix: AI sometimes outputs minutes.seconds format (e.g., 1.30 for 1min 30sec)
+      // Detect this if timestamps seem too small for the audio duration
+      if (maxDuration > 60 && endTime < 10 && endTime < startTime) {
+        const mins = Math.floor(endTime);
+        const secs = Math.round((endTime % 1) * 100);
+        endTime = mins * 60 + secs;
+        hasQualityIssues = true;
+      }
+
+      // Fix: startTime should be >= previous endTime (allow 0.5s overlap tolerance)
+      if (startTime < prevEndTime - 0.5 && i > 0) {
+        console.warn(
+          `Segment ${i}: startTime ${startTime} overlaps with previous endTime ${prevEndTime}`,
+        );
+        startTime = prevEndTime;
+        hasQualityIssues = true;
+      }
+
+      // Fix: endTime must be > startTime
+      if (endTime <= startTime) {
+        console.warn(
+          `Segment ${i}: endTime ${endTime} <= startTime ${startTime}, adjusting`,
+        );
+        endTime = startTime + 5; // Default 5 second segment
+        hasQualityIssues = true;
+      }
+
+      // Clamp to max duration if known
+      if (maxDuration > 0) {
+        if (endTime > maxDuration + 5) {
+          // Allow 5s tolerance
+          console.warn(
+            `Segment ${i}: endTime ${endTime} exceeds duration ${maxDuration}`,
+          );
+          endTime = maxDuration;
+          hasQualityIssues = true;
+        }
+        if (startTime > maxDuration) {
+          console.warn(`Segment ${i}: starts beyond audio duration, marking`);
+          hasQualityIssues = true;
+        }
+      }
+
+      prevEndTime = endTime;
+      return { ...seg, startTime, endTime };
+    });
+
+    return { segments: normalized, hasQualityIssues };
+  }
+
   async transcribe(meetingId: string) {
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
@@ -82,13 +156,15 @@ export class TranscriptionsService {
         `Uploaded file ${uploadResponse.file.displayName} as: ${uploadResponse.file.uri}`,
       );
 
-      // 2. Generate content using Gemini 2.0 Flash (stable model)
+      // 2. Generate content using Gemini 2.0 Flash (stable model) with retry logic
       const model = this.genAI.getGenerativeModel({
         model: 'gemini-2.0-flash',
       });
 
-      const result = await model.generateContent([
-        `You are a professional audio transcription engine. Transcribe the ENTIRE audio file from beginning to end.
+      const result = await withGeminiRetry(
+        () =>
+          model.generateContent([
+            `You are a professional audio transcription engine. Transcribe the ENTIRE audio file from beginning to end.
 
 ## CRITICAL REQUIREMENTS
 
@@ -153,13 +229,15 @@ Return ONLY a valid JSON array. No markdown, no explanation, no preamble.
 ]
 
 Remember: Transcribe the COMPLETE audio. Your final segment's endTime should match the audio's total duration.`,
-        {
-          fileData: {
-            mimeType,
-            fileUri: uploadResponse.file.uri,
-          },
-        },
-      ]);
+            {
+              fileData: {
+                mimeType,
+                fileUri: uploadResponse.file.uri,
+              },
+            },
+          ]),
+        `Transcription for meeting ${meetingId}`,
+      );
 
       const responseText = result.response.text();
       const jsonString = responseText.replace(/```json\n?|\n?```/g, '').trim();
@@ -172,6 +250,17 @@ Remember: Transcribe the COMPLETE audio. Your final segment's endTime should mat
         segments = [
           { speakerLabel: 'Unknown', text: responseText, startTime: 0, endTime: 0 },
         ];
+      }
+
+      // Normalize and validate timestamps
+      const { segments: normalizedSegments, hasQualityIssues } =
+        this.normalizeSegments(segments, meeting.durationSeconds || 0);
+      segments = normalizedSegments;
+
+      if (hasQualityIssues) {
+        console.warn(
+          `Meeting ${meetingId}: transcript had timestamp quality issues that were auto-corrected`,
+        );
       }
 
       // 3. Process Segments and Speakers with enhanced data

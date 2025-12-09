@@ -110,4 +110,9 @@ export class AuthService {
     const user = await this.usersService.createWithPlan(email, hash);
     return this.login(user);
   }
+
+  async validateGoogleUser(details: { email: string; name: string; picture?: string }) {
+    const user = await this.usersService.createOrUpdateGoogleUser(details.email, details.name);
+    return user;
+  }
 }

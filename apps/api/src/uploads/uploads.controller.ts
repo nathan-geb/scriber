@@ -34,12 +34,20 @@ export class UploadsController {
   async uploadFile(
     @UploadedFile() file: Express.Multer.File,
     @Body('language') languageCode: string,
+    @Body('duration') durationStr: string,
     @Request() req: any,
   ) {
     if (!file) {
       throw new BadRequestException('File is required');
     }
-    return this.uploadsService.handleFileUpload(file, req.user, languageCode);
+    // Parse optional client-provided duration (for WebM fallback)
+    const clientDuration = durationStr ? parseInt(durationStr, 10) : undefined;
+    return this.uploadsService.handleFileUpload(
+      file,
+      req.user,
+      languageCode,
+      clientDuration,
+    );
   }
 
   /**

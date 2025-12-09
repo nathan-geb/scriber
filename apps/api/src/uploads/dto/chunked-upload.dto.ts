@@ -22,6 +22,11 @@ export class InitiateChunkedUploadDto {
     @IsOptional()
     @IsString()
     language?: string;
+
+    @IsOptional()
+    @IsNumber()
+    @Min(1)
+    duration?: number; // Client-provided duration in seconds (fallback for WebM)
 }
 
 /**
@@ -31,4 +36,9 @@ export class CompleteChunkedUploadDto {
     @IsOptional()
     @IsString()
     language?: string;
+
+    @IsOptional()
+    @IsNumber()
+    @Min(1)
+    duration?: number; // Client-provided duration in seconds (fallback for WebM)
 }

@@ -1,12 +1,35 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-
+import { withGeminiRetry } from '../common/gemini-retry';
 import { NotificationsService } from '../notifications/notifications.service';
+import { EventsGateway } from '../events/events.gateway';
 
-export type MinutesTemplate = 'EXECUTIVE' | 'DETAILED' | 'ACTION_ITEMS' | 'COMPREHENSIVE';
+export type MinutesTemplate =
+  | 'EXECUTIVE'
+  | 'DETAILED'
+  | 'ACTION_ITEMS'
+  | 'COMPREHENSIVE'
+  | 'GENERAL_SUMMARY';
 
 const TEMPLATE_PROMPTS: Record<MinutesTemplate, string> = {
+  GENERAL_SUMMARY: `You are an expert meeting secretary. Generate a clear, narrative summary of this meeting.
+    
+    Format in Markdown:
+    # Meeting Summary
+    
+    ## Overview
+    A flowing narrative (3-5 paragraphs) describing what was discussed in the meeting.
+    Write in a natural, readable style - not bullet points.
+    
+    ## Key Takeaways
+    3-5 bullet points of the most important information from the meeting.
+    
+    ## Participants
+    List the speakers identified in the transcript.
+    
+    Do NOT include action items or tasks - this is purely an informational summary.`,
+
   EXECUTIVE: `You are an expert meeting secretary. Generate a concise executive summary.
     
     Format in Markdown:
@@ -73,6 +96,7 @@ export class MinutesService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private eventsGateway: EventsGateway,
   ) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
@@ -120,38 +144,68 @@ export class MinutesService {
       });
 
       const prompt = `${TEMPLATE_PROMPTS[template]}
-
-        Transcript:
+      
+      Transcript:
         ${transcriptText}
       `;
 
-      const result = await model.generateContent(prompt);
-      const content = result.response.text();
+      // Start progress simulation
+      let progress = 10;
+      const progressInterval = setInterval(() => {
+        if (progress < 90) {
+          progress += 10;
+          this.eventsGateway.emitPipelineStep(meeting.userId, meetingId, {
+            step: 'minutes',
+            status: 'processing',
+            progress,
+          });
+        }
+      }, 2000);
 
-      // Save Minutes
-      const minutes = await this.prisma.minutes.upsert({
-        where: { meetingId },
-        update: { content },
-        create: {
-          meetingId,
-          content,
-        },
-      });
+      try {
+        const result = await withGeminiRetry(
+          () => model.generateContent(prompt),
+          `Minutes generation for meeting ${meetingId}`,
+        );
+        const content = result.response.text();
 
-      // Update Meeting Status
-      await this.prisma.meeting.update({
-        where: { id: meetingId },
-        data: { status: 'COMPLETED' },
-      });
+        clearInterval(progressInterval);
 
-      // Notify User
-      await this.notifications.sendEmail(
-        meeting.userId,
-        `Minutes Ready: ${meeting.title}`,
-        `Your meeting minutes for "${meeting.title}" are ready.\n\nSummary:\n${content.substring(0, 200)}...`,
-      );
+        // Save Minutes
+        const minutes = await this.prisma.minutes.upsert({
+          where: { meetingId },
+          update: { content },
+          create: {
+            meetingId,
+            content,
+          },
+        });
 
-      return minutes;
+        // Update Meeting Status
+        await this.prisma.meeting.update({
+          where: { id: meetingId },
+          data: { status: 'COMPLETED' },
+        });
+
+        // Emit completion event
+        this.eventsGateway.emitPipelineStep(meeting.userId, meetingId, {
+          step: 'minutes',
+          status: 'completed',
+          progress: 100,
+        });
+
+        // Notify User
+        await this.notifications.sendEmail(
+          meeting.userId,
+          `Minutes Ready: ${meeting.title} `,
+          `Your meeting minutes for "${meeting.title}" are ready.\n\nSummary: \n${content.substring(0, 200)}...`,
+        );
+
+        return minutes;
+      } catch (error) {
+        clearInterval(progressInterval);
+        throw error;
+      }
     } catch (error) {
       console.error('Minutes generation failed:', error);
       await this.prisma.meeting.update({
@@ -249,15 +303,41 @@ export class MinutesService {
       model: 'gemini-2.0-flash',
     });
 
-    const prompt = `Translate the following meeting minutes into ${language}.
-      Maintain the original Markdown structure and formatting exactly.
-      Only output the translated markdown content.
-      
-      Minutes:
-      ${meeting.minutes.content}
-    `;
+    const prompt = `You are a professional meeting secretary fluent in ${language}.
 
-    const result = await model.generateContent(prompt);
+Translate the following meeting minutes into ${language} using:
+
+## Translation Quality Requirements
+        - Use professional business register appropriate for ${language} culture
+          - Apply native - sounding phrasing(NOT literal word -for-word translation)
+        - Maintain proper formal grammar and business terminology
+          - Preserve the original meaning while adapting to ${language} conventions
+
+## Language - Specific Guidelines
+        - ** Spanish **: Use formal "usted" form, business - appropriate vocabulary
+          - ** French **: Use formal "vous" form, professional phrasing
+            - ** German **: Use formal "Sie" form, structured sentences
+              - ** Japanese **: Use です / ます form, appropriate keigo(敬語)
+                - ** Chinese **: Use formal written style(书面语)
+                  - ** Arabic **: Use Modern Standard Arabic, formal register
+                    - ** Portuguese **: Use formal "você/o senhor" as appropriate
+                      - ** Amharic **: Use formal respectful forms
+
+## Structure Requirements
+        - Maintain exact Markdown structure(headers, bullets, checkboxes, formatting)
+          - Keep section organization identical
+            - Preserve any names, dates, or specific terminology
+
+Output ONLY the translated markdown.No explanations or notes.
+
+Minutes to translate:
+${meeting.minutes.content}
+      `;
+
+    const result = await withGeminiRetry(
+      () => model.generateContent(prompt),
+      `Translation to ${language} for meeting ${meetingId}`,
+    );
     const translatedContent = result.response.text();
 
     // Update language indicator but don't overwrite original content
