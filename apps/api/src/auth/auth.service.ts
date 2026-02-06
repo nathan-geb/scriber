@@ -7,6 +7,7 @@ interface TokenPayload {
   email: string;
   sub: string;
   role: string;
+  orgId?: string; // Add current org context
   type?: 'access' | 'refresh';
 }
 
@@ -25,7 +26,7 @@ export class AuthService {
   constructor(
     private usersService: UsersService,
     private jwtService: JwtService,
-  ) { }
+  ) {}
 
   async validateUser(email: string, pass: string): Promise<any> {
     const user = await this.usersService.findOne(email);
@@ -40,7 +41,15 @@ export class AuthService {
    * Generate both access and refresh tokens
    */
   private generateTokens(user: any): AuthTokens {
-    const payload: TokenPayload = { email: user.email, sub: user.id, role: user.role };
+    // Determine the default organization (first one found)
+    const defaultOrgId = user.memberships?.[0]?.organizationId;
+
+    const payload: TokenPayload = {
+      email: user.email,
+      sub: user.id,
+      role: user.role,
+      orgId: defaultOrgId,
+    };
 
     const access_token = this.jwtService.sign(
       { ...payload, type: 'access' },
@@ -60,10 +69,17 @@ export class AuthService {
   }
 
   async login(user: any) {
-    const tokens = this.generateTokens(user);
+    // If memberships aren't already included, fetch them
+    let userWithOrgs = user;
+    if (!user.memberships) {
+      userWithOrgs = await this.usersService.findById(user.id);
+    }
+
+    const tokens = this.generateTokens(userWithOrgs);
+    const { password, ...safeUser } = userWithOrgs;
     return {
       ...tokens,
-      user,
+      user: safeUser,
     };
   }
 
@@ -111,8 +127,34 @@ export class AuthService {
     return this.login(user);
   }
 
-  async validateGoogleUser(details: { email: string; name: string; picture?: string }) {
-    const user = await this.usersService.createOrUpdateGoogleUser(details.email, details.name);
+  async validateGoogleUser(details: {
+    email: string;
+    name: string;
+    picture?: string;
+  }) {
+    const user = await this.usersService.createOrUpdateGoogleUser(
+      details.email,
+      details.name,
+    );
+    return user;
+  }
+
+  async validateAppleUser(details: {
+    email: string;
+    appleId: string;
+    name?: string;
+  }) {
+    // Treat Apple sign-in similarly to Google: find by email (if available) or create
+    // Ideally we should store the 'appleId' (sub) in the DB as a linked account identity,
+    // but for now we follow the existing Google pattern (email-based).
+    // If email is hidden by Apple, we might have issues if we rely solely on email.
+    // However, existing usersService seems email-centric.
+
+    // Check if user exists by email
+    const user = await this.usersService.createOrUpdateGoogleUser(
+      details.email,
+      details.name || 'Apple User',
+    );
     return user;
   }
 }

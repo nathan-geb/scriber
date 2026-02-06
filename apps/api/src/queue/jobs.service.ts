@@ -1,9 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue, Job } from 'bullmq';
 import { TranscriptionJobData } from './transcription.processor';
 import { MinutesJobData } from './minutes.processor';
+import { EnhancementJobData } from './enhancement.processor';
+import { RedactionJobData } from './redaction.processor';
 import { PrismaService } from '../prisma/prisma.service';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface JobInfo {
   id: string;
@@ -15,18 +19,48 @@ export interface JobInfo {
 }
 
 @Injectable()
-export class JobsService {
+export class JobsService implements OnModuleInit {
   constructor(
     @InjectQueue('transcription') private transcriptionQueue: Queue,
     @InjectQueue('minutes') private minutesQueue: Queue,
+    @InjectQueue('enhancement') private enhancementQueue: Queue,
+    @InjectQueue('redaction') private redactionQueue: Queue,
+    @InjectQueue('cleanup') private cleanupQueue: Queue,
     private prisma: PrismaService,
-  ) { }
+  ) {}
+
+  async onModuleInit() {
+    // Schedule cleanup job to run every day at midnight
+    await this.cleanupQueue.add(
+      'daily-cleanup',
+      {},
+      {
+        repeat: {
+          pattern: '0 0 * * *', // Every night at midnight
+        },
+        jobId: 'daily-retention-cleanup', // Ensure only one instance exists
+      },
+    );
+  }
 
   /**
    * Add a transcription job to the queue
    */
   async addTranscriptionJob(data: TranscriptionJobData): Promise<Job> {
     return this.transcriptionQueue.add('transcribe', data, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 5000,
+      },
+    });
+  }
+
+  /**
+   * Add an enhancement job to the queue
+   */
+  async addEnhancementJob(data: EnhancementJobData): Promise<Job> {
+    return this.enhancementQueue.add('enhance', data, {
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -49,14 +83,31 @@ export class JobsService {
   }
 
   /**
+   * Add a redaction job to the queue
+   */
+  async addRedactionJob(data: RedactionJobData): Promise<Job> {
+    return this.redactionQueue.add('redact', data, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 5000,
+      },
+    });
+  }
+
+  /**
    * Get job status by ID
    */
   async getJobStatus(
     jobId: string,
-    type: 'transcription' | 'minutes',
+    type: 'transcription' | 'minutes' | 'enhancement' | 'redaction',
   ): Promise<JobInfo | null> {
-    const queue =
-      type === 'transcription' ? this.transcriptionQueue : this.minutesQueue;
+    let queue: Queue;
+    if (type === 'transcription') queue = this.transcriptionQueue;
+    else if (type === 'minutes') queue = this.minutesQueue;
+    else if (type === 'enhancement') queue = this.enhancementQueue;
+    else queue = this.redactionQueue;
+
     const job = await queue.getJob(jobId);
 
     if (!job) return null;
@@ -79,24 +130,36 @@ export class JobsService {
   async getUserActiveJobs(userId: string): Promise<JobInfo[]> {
     const jobs: JobInfo[] = [];
 
-    // Get active and waiting jobs from both queues
+    // Get active and waiting jobs from all queues
     const [
       transcriptionActive,
       transcriptionWaiting,
+      enhancementActive,
+      enhancementWaiting,
       minutesActive,
       minutesWaiting,
+      redactionActive,
+      redactionWaiting,
     ] = await Promise.all([
       this.transcriptionQueue.getJobs(['active']),
       this.transcriptionQueue.getJobs(['waiting']),
+      this.enhancementQueue.getJobs(['active']),
+      this.enhancementQueue.getJobs(['waiting']),
       this.minutesQueue.getJobs(['active']),
       this.minutesQueue.getJobs(['waiting']),
+      this.redactionQueue.getJobs(['active']),
+      this.redactionQueue.getJobs(['waiting']),
     ]);
 
     const allJobs = [
       ...transcriptionActive,
       ...transcriptionWaiting,
+      ...enhancementActive,
+      ...enhancementWaiting,
       ...minutesActive,
       ...minutesWaiting,
+      ...redactionActive,
+      ...redactionWaiting,
     ];
 
     for (const job of allJobs) {
@@ -124,9 +187,22 @@ export class JobsService {
       'active',
       'waiting',
     ]);
+    const enhancementJobs = await this.enhancementQueue.getJobs([
+      'active',
+      'waiting',
+    ]);
     const minutesJobs = await this.minutesQueue.getJobs(['active', 'waiting']);
+    const redactionJobs = await this.redactionQueue.getJobs([
+      'active',
+      'waiting',
+    ]);
 
-    const allJobs = [...transcriptionJobs, ...minutesJobs];
+    const allJobs = [
+      ...transcriptionJobs,
+      ...enhancementJobs,
+      ...minutesJobs,
+      ...redactionJobs,
+    ];
 
     const job = allJobs.find((j) => j.data.meetingId === meetingId);
 
@@ -145,18 +221,16 @@ export class JobsService {
   }
 
   /**
-   * Retry a failed/stuck job by re-adding it to the queue.
-   * Smart retry: checks what stage failed and retries appropriately.
+   * Retry a failed/stuck job
    */
   async retryJob(
     meetingId: string,
     userId: string,
   ): Promise<Job | { success: boolean; message: string }> {
-    // Get meeting with transcript info to determine failure stage
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
       include: {
-        transcript: { take: 1 }, // Just check if any transcript exists
+        transcript: { take: 1 },
         minutes: true,
       },
     });
@@ -169,33 +243,32 @@ export class JobsService {
     const hasMinutes = meeting.minutes !== null;
 
     if (hasTranscript && !hasMinutes) {
-      // Transcript exists but minutes failed - retry minutes only
       await this.prisma.meeting.update({
         where: { id: meetingId },
-        data: { status: 'TRANSCRIPT_READY' },
+        data: {
+          status: 'TRANSCRIPT_READY',
+          lastProcessedAt: new Date(),
+        },
       });
       return this.addMinutesJob({
         meetingId,
         userId,
-        template: 'EXECUTIVE', // Default template for retry
+        template: 'EXECUTIVE',
       });
     }
 
     if (hasTranscript && hasMinutes) {
-      // Both exist - meeting is actually complete, just fix status
       await this.prisma.meeting.update({
         where: { id: meetingId },
         data: { status: 'COMPLETED' },
       });
-      return { success: true, message: 'Meeting was already complete, status fixed' };
+      return {
+        success: true,
+        message: 'Meeting was already complete, status fixed',
+      };
     }
 
-    // No transcript - need to re-process from beginning
-
-    // Check if file still exists
     if (meeting.fileUrl) {
-      const fs = require('fs');
-      const path = require('path');
       let filePath = meeting.fileUrl;
       if (!path.isAbsolute(filePath)) {
         filePath = path.join(process.cwd(), filePath);
@@ -207,61 +280,59 @@ export class JobsService {
       return { success: false, message: 'FILE_MISSING' };
     }
 
-    // Reset meeting status to UPLOADED to restart the pipeline
     await this.prisma.meeting.update({
       where: { id: meetingId },
-      data: { status: 'UPLOADED' },
+      data: {
+        status: 'UPLOADED',
+        lastProcessedAt: new Date(),
+      },
     });
 
-    // Re-add transcription job
     return this.addTranscriptionJob({ meetingId, userId });
   }
 
   /**
    * Cancel a job by meeting ID
-   * Only allows cancellation if the job belongs to the specified user
    */
   async cancelJob(
     meetingId: string,
     userId: string,
   ): Promise<{ success: boolean; message: string }> {
-    // Find the job in both queues
-    const transcriptionJobs = await this.transcriptionQueue.getJobs([
-      'active',
-      'waiting',
-      'delayed',
-    ]);
-    const minutesJobs = await this.minutesQueue.getJobs([
-      'active',
-      'waiting',
-      'delayed',
-    ]);
+    const [transcriptionJobs, enhancementJobs, minutesJobs, redactionJobs] =
+      await Promise.all([
+        this.transcriptionQueue.getJobs(['active', 'waiting', 'delayed']),
+        this.enhancementQueue.getJobs(['active', 'waiting', 'delayed']),
+        this.minutesQueue.getJobs(['active', 'waiting', 'delayed']),
+        this.redactionQueue.getJobs(['active', 'waiting', 'delayed']),
+      ]);
 
-    const allJobs = [...transcriptionJobs, ...minutesJobs];
+    const allJobs = [
+      ...transcriptionJobs,
+      ...enhancementJobs,
+      ...minutesJobs,
+      ...redactionJobs,
+    ];
     const job = allJobs.find((j) => j.data.meetingId === meetingId);
 
     if (!job) {
-      return { success: false, message: 'No active job found for this meeting' };
+      return {
+        success: false,
+        message: 'No active job found for this meeting',
+      };
     }
 
-    // Verify ownership
     if (job.data.userId !== userId) {
       return { success: false, message: 'Unauthorized to cancel this job' };
     }
 
     const state = await job.getState();
 
-    // Can only cancel waiting or delayed jobs safely
-    // Active jobs are already processing
     if (state === 'active') {
-      // For active jobs, we can try to move them to failed state
       await job.moveToFailed(new Error('Cancelled by user'), job.token || '');
     } else {
-      // Remove the job from queue
       await job.remove();
     }
 
-    // Update meeting status to CANCELLED
     await this.prisma.meeting.update({
       where: { id: meetingId },
       data: { status: 'CANCELLED' },
@@ -270,4 +341,3 @@ export class JobsService {
     return { success: true, message: 'Job cancelled successfully' };
   }
 }
-

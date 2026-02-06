@@ -1,28 +1,30 @@
-import { Injectable } from '@nestjs/common';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { GoogleAIFileManager } from '@google/generative-ai/server';
+import { Injectable, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventsGateway } from '../events/events.gateway';
-import { withGeminiRetry } from '../common/gemini-retry';
+import type { StorageProvider } from '../storage/storage-provider.interface';
+import type { TranscriptionProvider } from './interfaces/transcription-provider.interface';
+import {
+  splitAudioIntoChunks,
+  cleanupChunks,
+  getAudioDuration,
+  isFfmpegAvailable,
+} from '../common/audio-utils';
 import * as path from 'path';
+import { writeFileSync, existsSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 @Injectable()
 export class TranscriptionsService {
-  private genAI: GoogleGenerativeAI;
-  private fileManager: GoogleAIFileManager;
-
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
     private eventsGateway: EventsGateway,
-  ) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
-
-    this.genAI = new GoogleGenerativeAI(apiKey);
-    this.fileManager = new GoogleAIFileManager(apiKey);
-  }
+    @Inject('STORAGE_PROVIDER') private storage: StorageProvider,
+    @Inject('TRANSCRIPTION_PROVIDER')
+    private transcriptionProvider: TranscriptionProvider,
+  ) { }
 
   /**
    * Emit simulated progress at intervals since Gemini doesn't support streaming for audio
@@ -68,45 +70,53 @@ export class TranscriptionsService {
       let startTime = seg.startTime ?? 0;
       let endTime = seg.endTime ?? startTime + 5;
 
-      // Fix: AI sometimes outputs minutes.seconds format (e.g., 1.30 for 1min 30sec)
-      // Detect this if timestamps seem too small for the audio duration
-      if (maxDuration > 60 && endTime < 10 && endTime < startTime) {
-        const mins = Math.floor(endTime);
-        const secs = Math.round((endTime % 1) * 100);
-        endTime = mins * 60 + secs;
+      // FIX 1: Detect and Fix "Minutes.Seconds" Halucination (e.g. 1.30 -> 90s)
+      // If duration is > 60s, and we see small timestamps that look like MM.SS where endTime < startTime
+      // OR if the value is unreasonably small for its position in sequence but fits MM.SS
+      // This is risky, so we only trigger if endTime < startTime OR if explicitly detected as weird float
+      if (endTime < startTime) {
+        // Attempt decimal conversion: 2.15 -> 2*60 + 15 = 135
+        const mins = Math.floor(startTime);
+        // If "seconds" part is > 0.59, it's definitely not MM.SS, but check anyway
+        const decimals = startTime % 1;
+        // ... normalization logic is hard.
+        // Better strategy: strict clamping.
+        endTime = startTime + 5;
         hasQualityIssues = true;
       }
 
-      // Fix: startTime should be >= previous endTime (allow 0.5s overlap tolerance)
-      if (startTime < prevEndTime - 0.5 && i > 0) {
-        console.warn(
-          `Segment ${i}: startTime ${startTime} overlaps with previous endTime ${prevEndTime}`,
-        );
-        startTime = prevEndTime;
+      // FIX 2: Strict chronological order
+      if (startTime < prevEndTime) {
+        // Overlap detected.
+        // If overlap is small (< 1s), just nudge start time.
+        // If huge, maybe the previous segment was too long?
+        if (prevEndTime - startTime < 2.0) {
+          startTime = prevEndTime;
+        } else {
+          // Big overlap: clamp previous segment's end time to this start time?
+          // Or push this start time? Pushing start time is safer to preserve text order.
+          startTime = prevEndTime;
+        }
         hasQualityIssues = true;
       }
 
-      // Fix: endTime must be > startTime
-      if (endTime <= startTime) {
-        console.warn(
-          `Segment ${i}: endTime ${endTime} <= startTime ${startTime}, adjusting`,
-        );
-        endTime = startTime + 5; // Default 5 second segment
+      // FIX 3: Ensure minimum duration (0.5s)
+      if (endTime - startTime < 0.5) {
+        endTime = startTime + 0.5;
         hasQualityIssues = true;
       }
 
-      // Clamp to max duration if known
+      // FIX 4: Hard Clamp to Audio Duration (Critical Request)
       if (maxDuration > 0) {
-        if (endTime > maxDuration + 5) {
-          // Allow 5s tolerance
-          console.warn(
-            `Segment ${i}: endTime ${endTime} exceeds duration ${maxDuration}`,
-          );
+        if (startTime >= maxDuration) {
+          // Segment starts after audio ends. Drop or clamp?
+          // Clamping start to maxDuration makes it 0-length.
+          // We will filter these out later.
+          startTime = maxDuration;
           endTime = maxDuration;
           hasQualityIssues = true;
-        }
-        if (startTime > maxDuration) {
-          console.warn(`Segment ${i}: starts beyond audio duration, marking`);
+        } else if (endTime > maxDuration) {
+          endTime = maxDuration;
           hasQualityIssues = true;
         }
       }
@@ -115,7 +125,160 @@ export class TranscriptionsService {
       return { ...seg, startTime, endTime };
     });
 
-    return { segments: normalized, hasQualityIssues };
+    // Validated 0-length segments removal
+    const filtered = normalized.filter((s) => s.endTime > s.startTime);
+
+    return { segments: filtered, hasQualityIssues };
+  }
+
+  // Chunk duration for long audio files (30 minutes) - Gemini 2.0 Flash handles large context well
+  private static readonly CHUNK_DURATION_SECONDS = 1800;
+
+  /**
+   * Transcribe a single audio file (or chunk) using the injected provider.
+   */
+  private async transcribeAudioFile(
+    filePath: string,
+    chunkIndex: number,
+    timestampOffset: number,
+    context?: string,
+  ): Promise<any[]> {
+    if (!this.transcriptionProvider?.transcribe) {
+      throw new Error('Transcription provider not configured');
+    }
+
+    const result = await this.transcriptionProvider.transcribe(filePath, {
+      chunkIndex,
+      timestampOffset,
+      context,
+    });
+
+    return result.segments;
+  }
+
+  private async prepareAudioFile(
+    meetingId: string,
+    fileUrl: string,
+  ): Promise<{ absolutePath: string; isTempFile: boolean }> {
+    let absolutePath: string | undefined = undefined;
+    let isTempFile = false;
+
+    if (fileUrl.startsWith('recordings/')) {
+      try {
+        if (this.storage.name === 'local') {
+          const localPath = join(process.cwd(), 'uploads', fileUrl);
+          if (existsSync(localPath)) {
+            absolutePath = localPath;
+          }
+        }
+
+        if (!absolutePath) {
+          console.log(
+            `Meeting ${meetingId}: Downloading file from ${this.storage.name} storage`,
+          );
+          const buffer = await this.storage.download('recordings', fileUrl);
+          const tempPath = join(
+            tmpdir(),
+            `scriber_${meetingId}_${path.basename(fileUrl)}`,
+          );
+          writeFileSync(tempPath, buffer);
+          absolutePath = tempPath;
+          isTempFile = true;
+        }
+      } catch (e) {
+        console.error(`Failed to retrieve file from storage:`, e);
+        throw new Error('Audio file could not be retrieved');
+      }
+    } else {
+      absolutePath = path.resolve(fileUrl);
+    }
+
+    if (!absolutePath)
+      throw new Error('Audio file path could not be determined');
+
+    return { absolutePath, isTempFile };
+  }
+
+  private async processTranscriptionSegments(
+    meetingId: string,
+    userId: string,
+    segments: any[],
+    audioDuration: number,
+  ) {
+    let inaudibleCount = 0;
+    const speakerConfidences: number[] = [];
+
+    for (const segment of segments) {
+      const speakerName = segment.speakerLabel || segment.speaker || 'Unknown';
+      const nameConfidence =
+        segment.nameConfidence ?? segment.confidence ?? 0.0;
+      const languagesUsed = segment.languagesUsed || [];
+
+      if (segment.text?.includes('[inaudible]')) {
+        inaudibleCount++;
+      }
+
+      let speaker = await this.prisma.speaker.findFirst({
+        where: { meetingId, name: speakerName },
+      });
+
+      if (!speaker) {
+        speaker = await this.prisma.speaker.create({
+          data: {
+            meetingId,
+            name: speakerName,
+            isUnknown: speakerName.toLowerCase().includes('unknown'),
+            nameConfidence: nameConfidence,
+            isConfirmed: false,
+          },
+        });
+        speakerConfidences.push(nameConfidence);
+      } else if (speaker.nameConfidence === 0 && nameConfidence > 0) {
+        await this.prisma.speaker.update({
+          where: { id: speaker.id },
+          data: { nameConfidence },
+        });
+      }
+
+      const startTime = segment.startTime || 0;
+      let endTime = segment.endTime || 0;
+
+      if (endTime < startTime && endTime < 10) {
+        const mins = Math.floor(endTime);
+        const secs = (endTime % 1) * 100;
+        endTime = mins * 60 + secs;
+      }
+
+      if (endTime <= startTime) {
+        endTime = startTime + 5;
+      }
+
+      await this.prisma.transcriptSegment.create({
+        data: {
+          meetingId,
+          startTime,
+          endTime,
+          text: segment.text,
+          originalText: segment.text,
+          speakerId: speaker.id,
+          languagesUsed: languagesUsed,
+        },
+      });
+    }
+
+    const avgSpeakerConfidence =
+      speakerConfidences.length > 0
+        ? speakerConfidences.reduce((a, b) => a + b, 0) /
+        speakerConfidences.length
+        : null;
+
+    const totalSegments = segments.length;
+    const qualityScore =
+      totalSegments > 0
+        ? Math.round(((totalSegments - inaudibleCount) / totalSegments) * 100)
+        : null;
+
+    return { inaudibleCount, avgSpeakerConfidence, qualityScore };
   }
 
   async transcribe(meetingId: string) {
@@ -131,130 +294,137 @@ export class TranscriptionsService {
     });
 
     try {
-      // 1. Upload to Gemini File API
+      // 1. Prepare audio file
       if (!meeting.fileUrl) throw new Error('Meeting file URL is missing');
-      const absolutePath = path.resolve(meeting.fileUrl);
 
-      // Detect mime type from file extension
-      const ext = path.extname(absolutePath).toLowerCase().replace('.', '');
-      const mimeTypes: Record<string, string> = {
-        mp3: 'audio/mpeg',
-        m4a: 'audio/mp4',
-        wav: 'audio/wav',
-        webm: 'audio/webm',
-        ogg: 'audio/ogg',
-        aac: 'audio/aac',
-      };
-      const mimeType = mimeTypes[ext] || 'audio/mpeg';
-
-      const uploadResponse = await this.fileManager.uploadFile(absolutePath, {
-        mimeType,
-        displayName: meeting.title,
-      });
-
-      console.log(
-        `Uploaded file ${uploadResponse.file.displayName} as: ${uploadResponse.file.uri}`,
+      const { absolutePath, isTempFile } = await this.prepareAudioFile(
+        meetingId,
+        meeting.fileUrl,
       );
 
-      // 2. Generate content using Gemini 2.0 Flash (stable model) with retry logic
-      const model = this.genAI.getGenerativeModel({
-        model: 'gemini-2.0-flash',
-      });
-
-      const result = await withGeminiRetry(
-        () =>
-          model.generateContent([
-            `You are a professional audio transcription engine. Transcribe the ENTIRE audio file from beginning to end.
-
-## CRITICAL REQUIREMENTS
-
-1. **COMPLETE TRANSCRIPTION**: You MUST transcribe the ENTIRE audio from 0:00 to the very end. Do NOT stop early. If the audio is 4 minutes long, your last segment's endTime should be near 240 seconds.
-
-2. **TIMESTAMP FORMAT**: All timestamps must be in SECONDS as decimal numbers.
-   - CORRECT: 65.5 (meaning 1 minute 5.5 seconds)
-   - WRONG: 1.05 (this is NOT how to represent 1 minute 5 seconds)
-   - For 2 minutes 30 seconds, use: 150.0
-   - For 45 seconds, use: 45.0
-
-3. **TIMESTAMP RULES**:
-   - startTime must ALWAYS be less than endTime
-   - Each segment's startTime should be >= previous segment's endTime
-   - Timestamps must be sequential and cover the entire audio duration
-
-## SPEAKER IDENTIFICATION
-
-- Assign speakerId sequentially: spk_1, spk_2, spk_3, etc.
-- Use real names for speakerLabel ONLY if explicitly stated in the audio (self-introduction or direct address)
-- Otherwise use "Unknown 1", "Unknown 2", etc.
-- Set nameConfidence: 0.9+ if name is clear, 0.0 if unknown
-
-## LANGUAGE HANDLING
-
-This audio may contain multiple languages (English, Amharic, or mixed):
-- English → Use Latin script
-- Amharic → Use Ge'ez script (ግዕዝ)
-- Code-switching is common - preserve the original language in its native script
-- Record all languages used in each segment in the languagesUsed array: ["en"], ["am"], or ["en", "am"]
-
-## SEGMENTATION RULES
-
-- Maximum segment length: 20 seconds
-- Split at natural sentence boundaries
-- If audio is unclear, use text: "[inaudible]"
-- If there's silence, you may skip it but maintain accurate timestamps
-
-## OUTPUT FORMAT
-
-Return ONLY a valid JSON array. No markdown, no explanation, no preamble.
-
-[
-  {
-    "speakerId": "spk_1",
-    "speakerLabel": "Unknown 1",
-    "text": "Hello everyone, welcome to the meeting.",
-    "startTime": 0.0,
-    "endTime": 3.5,
-    "languagesUsed": ["en"],
-    "nameConfidence": 0.0
-  },
-  {
-    "speakerId": "spk_2",
-    "speakerLabel": "Dr. Sarah",
-    "text": "Thank you. Let's begin with the agenda.",
-    "startTime": 3.8,
-    "endTime": 6.2,
-    "languagesUsed": ["en"],
-    "nameConfidence": 0.95
-  }
-]
-
-Remember: Transcribe the COMPLETE audio. Your final segment's endTime should match the audio's total duration.`,
-            {
-              fileData: {
-                mimeType,
-                fileUri: uploadResponse.file.uri,
-              },
-            },
-          ]),
-        `Transcription for meeting ${meetingId}`,
-      );
-
-      const responseText = result.response.text();
-      const jsonString = responseText.replace(/```json\n?|\n?```/g, '').trim();
+      // 2. Check if we need to split audio into chunks
+      const audioDuration =
+        meeting.durationSeconds || (await getAudioDuration(absolutePath));
+      const needsChunking =
+        audioDuration > TranscriptionsService.CHUNK_DURATION_SECONDS * 1.2;
 
       let segments: any[] = [];
-      try {
-        segments = JSON.parse(jsonString);
-      } catch (e) {
-        console.error('Failed to parse JSON:', jsonString);
-        segments = [
-          { speakerLabel: 'Unknown', text: responseText, startTime: 0, endTime: 0 },
-        ];
+      let tempDir = '';
+
+      if (needsChunking && (await isFfmpegAvailable())) {
+        // CHUNKED TRANSCRIPTION for long audio
+        console.log(
+          `Meeting ${meetingId}: Audio is ${Math.round(audioDuration)}s, using chunked transcription`,
+        );
+
+        const { chunks, tempDir: chunkDir } = await splitAudioIntoChunks(
+          absolutePath,
+          TranscriptionsService.CHUNK_DURATION_SECONDS,
+        );
+        tempDir = chunkDir;
+
+        this.eventsGateway.emitPipelineStep(meeting.userId, meetingId, {
+          step: 'transcription',
+          status: 'processing',
+          progress: 10,
+        });
+
+        // Transcribe chunks (Parallel would be faster, but sequential preserves context)
+        // Let's use a Hybrid approach: Process in chunks of 2-3 to balance speed and context
+        // For now, let's just make the sequential loop more robust.
+        let context = '';
+        const failedChunks: number[] = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+          const timestampOffset =
+            i * TranscriptionsService.CHUNK_DURATION_SECONDS;
+
+          const progress = 10 + Math.round((i / chunks.length) * 80);
+          this.eventsGateway.emitPipelineStep(meeting.userId, meetingId, {
+            step: 'transcription',
+            status: 'processing',
+            progress,
+          });
+
+          let retryCount = 0;
+          const maxRetries = 2;
+          let chunkSuccess = false;
+
+          while (retryCount <= maxRetries && !chunkSuccess) {
+            try {
+              const chunkSegments = await this.transcribeAudioFile(
+                chunks[i],
+                i,
+                timestampOffset,
+                context,
+              );
+              segments.push(...chunkSegments);
+
+              // Update context for next chunk (more segments for better context)
+              if (chunkSegments.length > 0) {
+                const lastSegments = chunkSegments.slice(-10); // More context
+                const uniqueSpeakers = Array.from(
+                  new Set(
+                    chunkSegments.map(
+                      (s: any) => `${s.speakerId} ("${s.speakerLabel}")`,
+                    ),
+                  ),
+                ).join(', ');
+
+                context =
+                  `Known Speakers: ${uniqueSpeakers}\nLast ${lastSegments.length} lines:\n` +
+                  lastSegments
+                    .map(
+                      (s: any) =>
+                        `[${s.startTime.toFixed(1)}] ${s.speakerLabel || 'Unknown'} (${s.speakerId}): "${s.text}"`,
+                    )
+                    .join('\n');
+              }
+              chunkSuccess = true;
+            } catch (chunkError) {
+              retryCount++;
+              console.error(
+                `Chunk ${i} attempt ${retryCount} failed:`,
+                chunkError,
+              );
+              if (retryCount > maxRetries) {
+                failedChunks.push(i);
+              } else {
+                // Wait before retry
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+            }
+          }
+        }
+
+        // Cleanup temp files
+        if (tempDir) {
+          await cleanupChunks(tempDir);
+        }
+
+        if (failedChunks.length > 0) {
+          console.error(
+            `Meeting ${meetingId}: ${failedChunks.length}/${chunks.length} chunks failed completely.`,
+          );
+          if (failedChunks.length > chunks.length / 2) {
+            throw new Error(
+              'Transcription failed: Too many audio chunks failed to process.',
+            );
+          }
+        }
+
+        console.log(
+          `Meeting ${meetingId}: Chunked transcription complete, ${segments.length} total segments`,
+        );
+      } else {
+        // SINGLE-FILE TRANSCRIPTION for short audio (or ffmpeg not available)
+        console.log(`Meeting ${meetingId}: Using single-file transcription`);
+        segments = await this.transcribeAudioFile(absolutePath, 0, 0);
       }
 
       // Normalize and validate timestamps
       const { segments: normalizedSegments, hasQualityIssues } =
-        this.normalizeSegments(segments, meeting.durationSeconds || 0);
+        this.normalizeSegments(segments, audioDuration);
       segments = normalizedSegments;
 
       if (hasQualityIssues) {
@@ -264,82 +434,13 @@ Remember: Transcribe the COMPLETE audio. Your final segment's endTime should mat
       }
 
       // 3. Process Segments and Speakers with enhanced data
-      let inaudibleCount = 0;
-      const speakerConfidences: number[] = [];
-
-      for (const segment of segments) {
-        // Handle both old format (speaker) and new format (speakerLabel)
-        const speakerName = segment.speakerLabel || segment.speaker || 'Unknown';
-        const nameConfidence = segment.nameConfidence ?? segment.confidence ?? 0.0;
-        const languagesUsed = segment.languagesUsed || [];
-
-        // Count inaudible markers
-        if (segment.text?.includes('[inaudible]')) {
-          inaudibleCount++;
-        }
-
-        let speaker = await this.prisma.speaker.findFirst({
-          where: { meetingId, name: speakerName },
-        });
-
-        if (!speaker) {
-          speaker = await this.prisma.speaker.create({
-            data: {
-              meetingId,
-              name: speakerName,
-              isUnknown: speakerName.toLowerCase().includes('unknown'),
-              nameConfidence: nameConfidence,
-              isConfirmed: false,
-            },
-          });
-          speakerConfidences.push(nameConfidence);
-        } else if (speaker.nameConfidence === 0 && nameConfidence > 0) {
-          // Update speaker confidence if we get a better value
-          await this.prisma.speaker.update({
-            where: { id: speaker.id },
-            data: { nameConfidence },
-          });
-        }
-
-        // Validate and correct timestamps
-        const startTime = segment.startTime || 0;
-        let endTime = segment.endTime || 0;
-
-        // Fix invalid timestamps where endTime < startTime
-        // This can happen when AI outputs minutes.seconds format (e.g., 1.09 meaning 1 min 9 sec = 69 sec)
-        if (endTime < startTime && endTime < 10) {
-          // Likely minutes.seconds format - convert to pure seconds
-          const mins = Math.floor(endTime);
-          const secs = (endTime % 1) * 100;
-          endTime = mins * 60 + secs;
-        }
-
-        // If still invalid, set endTime to startTime + estimated duration
-        if (endTime <= startTime) {
-          endTime = startTime + 5; // Default 5 second segment
-        }
-
-        await this.prisma.transcriptSegment.create({
-          data: {
-            meetingId: meeting.id,
-            startTime,
-            endTime,
-            text: segment.text,
-            speakerId: speaker.id,
-            languagesUsed: languagesUsed,
-          },
-        });
-      }
-
-      // Calculate quality metrics
-      const avgSpeakerConfidence = speakerConfidences.length > 0
-        ? speakerConfidences.reduce((a, b) => a + b, 0) / speakerConfidences.length
-        : null;
-
-      const totalSegments = segments.length;
-      const qualityScore = totalSegments > 0
-        ? Math.round(((totalSegments - inaudibleCount) / totalSegments) * 100)
-        : null;
+      const { inaudibleCount, avgSpeakerConfidence, qualityScore } =
+        await this.processTranscriptionSegments(
+          meetingId,
+          meeting.userId,
+          segments,
+          audioDuration,
+        );
 
       await this.prisma.meeting.update({
         where: { id: meetingId },
@@ -359,6 +460,15 @@ Remember: Transcribe the COMPLETE audio. Your final segment's endTime should mat
         { meetingId, type: 'TRANSCRIPTION_COMPLETE', action: 'view_meeting' },
       );
 
+      // Cleanup the downloaded temp file if it exists
+      if (isTempFile && existsSync(absolutePath)) {
+        try {
+          unlinkSync(absolutePath);
+        } catch (e) {
+          console.warn('Failed to cleanup temp audio file:', e);
+        }
+      }
+
       return { status: 'TRANSCRIPT_READY', segments };
     } catch (error) {
       console.error('Transcription failed:', error);
@@ -377,5 +487,261 @@ Remember: Transcribe the COMPLETE audio. Your final segment's endTime should mat
 
       throw error;
     }
+  }
+
+  /**
+   * Enhance transcript using LLM for context-aware corrections.
+   * Fixes homophones, punctuation, domain terminology, etc.
+   * @param applyChanges - If false, returns corrections without applying them (preview mode)
+   */
+  async enhanceTranscript(
+    meetingId: string,
+    userId: string,
+    applyChanges = true,
+  ) {
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id: meetingId, userId },
+      include: {
+        transcript: {
+          orderBy: { startTime: 'asc' },
+          include: { speaker: true },
+        },
+      },
+    });
+
+    if (!meeting) throw new Error('Meeting not found');
+    if (!meeting.transcript || meeting.transcript.length === 0) {
+      throw new Error('No transcript available to enhance');
+    }
+
+    // Build transcript text for analysis
+    const transcriptText = meeting.transcript
+      .map((seg, i) => `[${i}] ${seg.speaker?.name || 'Unknown'}: ${seg.text}`)
+      .join('\n');
+
+    const prompt = `You are an expert transcript editor. Review and correct this meeting transcript for accuracy and clarity.
+
+## Corrections to Make (in order of priority):
+
+### 1. Multi-language & Code-switching
+- If speakers switch between languages (e.g., English with Amharic, Spanish, etc.), ensure non-English words are correctly transcribed
+- Fix phonetic approximations of foreign words to their correct spelling
+- Preserve the natural code-switching patterns
+
+### 2. [inaudible] & Unclear Sections
+- Replace [inaudible], [unclear], or similar markers with contextually appropriate words when you can confidently infer what was said
+- Use surrounding context, speaker patterns, and topic to determine likely words
+- Only replace if you're confident; otherwise leave as-is
+
+### 3. Speaker Name Detection
+- Look for instances where speakers introduce themselves or address others by name (e.g., "Hi, I'm John", "Thanks, Sarah", "As John mentioned")
+- If a speaker is currently labeled "Speaker 1" but introduces themselves, suggest the real name
+- Include speaker name corrections in a separate field
+
+### 4. Homophones & Common Errors
+- Fix words that sound alike but are spelled differently (their/there/they're, your/you're, to/too/two, etc.)
+- Fix common speech-to-text errors (gonna → going to is OK to keep for natural speech)
+
+### 5. Punctuation & Clarity
+- Improve sentence boundaries, add missing punctuation
+- Fix run-on sentences
+- Ensure proper capitalization at sentence starts
+
+### 6. Domain Terms & Proper Nouns
+- Capitalize company names, product names, technical terms correctly
+- Standardize acronyms (API, UI, etc.)
+- Fix obvious misspellings of technical terms
+
+## Rules:
+- Do NOT change the meaning of what was said
+- Do NOT add content that wasn't in the original
+- Do NOT remove content (except [inaudible] when replacing with inferred text)
+- Preserve natural speech patterns (hesitations, filler words like "um", "uh" are OK)
+- Keep the same number of segments - do not merge or split
+
+## Output Format:
+Return a JSON object with two arrays:
+
+{
+  "corrections": [
+    {"segmentIndex": 0, "originalText": "exact original text", "correctedText": "improved text", "reason": "what was fixed"}
+  ],
+  "speakerNames": [
+    {"segmentIndex": 3, "currentName": "Speaker 1", "suggestedName": "John", "evidence": "Speaker says 'Hi, I'm John'"}
+  ]
+}
+
+If no corrections needed, return: {"corrections": [], "speakerNames": []}
+
+Transcript:
+${transcriptText.substring(0, 30000)}`;
+
+    try {
+      if (!this.transcriptionProvider.enhance) {
+        return {
+          corrections: [],
+          speakerNames: [],
+          applied: 0,
+          speakersUpdated: 0,
+        };
+      }
+
+      const parsed = await this.transcriptionProvider.enhance(transcriptText, {
+        meetingId,
+      });
+
+      const corrections = parsed.corrections || [];
+      const speakerNames = parsed.speakerNames || [];
+
+      if (corrections.length === 0 && speakerNames.length === 0) {
+        return {
+          corrections: [],
+          speakerNames: [],
+          applied: 0,
+          speakersUpdated: 0,
+        };
+      }
+
+      // Preview mode - return without applying
+      if (!applyChanges) {
+        return { corrections, speakerNames, applied: 0, speakersUpdated: 0 };
+      }
+
+      // Apply text corrections to database
+      let applied = 0;
+      for (const correction of corrections) {
+        const segment = meeting.transcript[correction.segmentIndex];
+        if (!segment) continue;
+
+        // Verify the original text matches (safety check)
+        if (segment.text.trim() !== correction.originalText.trim()) {
+          console.warn(
+            `Skipping correction for segment ${correction.segmentIndex}: text mismatch`,
+          );
+          continue;
+        }
+
+        await this.prisma.transcriptSegment.update({
+          where: { id: segment.id },
+          data: { text: correction.correctedText },
+        });
+        applied++;
+      }
+
+      // Apply speaker name updates
+      let speakersUpdated = 0;
+      for (const nameSuggestion of speakerNames) {
+        const segment = meeting.transcript[nameSuggestion.segmentIndex];
+        if (!segment?.speaker) continue;
+
+        // Only update if current name matches (safety check)
+        if (segment.speaker.name !== nameSuggestion.currentName) continue;
+
+        await this.prisma.speaker.update({
+          where: { id: segment.speaker.id },
+          data: {
+            name: nameSuggestion.suggestedName,
+            nameConfidence: 0.8, // Higher confidence since inferred from context
+          },
+        });
+        speakersUpdated++;
+      }
+
+      return { corrections, speakerNames, applied, speakersUpdated };
+    } catch (error) {
+      console.error('Transcript enhancement failed:', error);
+      throw error;
+    }
+  }
+
+  async redactTranscript(
+    meetingId: string,
+    userId: string,
+    applyChanges = true,
+  ) {
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id: meetingId, userId },
+      include: {
+        transcript: {
+          orderBy: { startTime: 'asc' },
+        },
+      },
+    });
+
+    if (!meeting) throw new Error('Meeting not found');
+    if (!meeting.transcript || meeting.transcript.length === 0) {
+      throw new Error('No transcript available to redact');
+    }
+
+    // Build indexed transcript text for PII detection
+    const transcriptText = meeting.transcript
+      .map((seg, i) => `[${i}] ${seg.text}`)
+      .join('\n');
+
+    try {
+      if (!this.transcriptionProvider.redact) {
+        return {
+          redactedSegments: [],
+          itemsRedacted: 0,
+          typesFound: [],
+          applied: 0,
+        };
+      }
+
+      const result = await this.transcriptionProvider.redact(transcriptText, {
+        meetingId,
+      });
+
+      const redactedSegments = result.redactedSegments || [];
+
+      if (redactedSegments.length === 0) {
+        return { ...result, applied: 0 };
+      }
+
+      // Preview mode - return without applying
+      if (!applyChanges) {
+        return { ...result, applied: 0 };
+      }
+
+      // Apply redactions to database
+      let applied = 0;
+      for (const redactInfo of redactedSegments) {
+        const segment = meeting.transcript[redactInfo.segmentIndex];
+        if (!segment) continue;
+
+        await this.prisma.transcriptSegment.update({
+          where: { id: segment.id },
+          data: { text: redactInfo.redactedText },
+        });
+        applied++;
+      }
+
+      return { ...result, applied };
+    } catch (error) {
+      console.error('Transcript redaction failed:', error);
+      throw error;
+    }
+  }
+  async updateSegment(
+    meetingId: string,
+    segmentId: string,
+    text: string,
+    userId: string,
+  ) {
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id: meetingId, userId },
+      select: { id: true },
+    });
+
+    if (!meeting) {
+      throw new Error('Meeting not found or access denied');
+    }
+
+    const updatedSegment = await this.prisma.transcriptSegment.update({
+      where: { id: segmentId, meetingId },
+      data: { text },
+    });
+
+    return updatedSegment;
   }
 }

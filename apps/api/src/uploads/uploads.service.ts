@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Inject,
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
@@ -7,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { UsageService } from '../usage/usage.service';
 import { JobsService } from '../queue/jobs.service';
 import { EventsGateway } from '../events/events.gateway';
+import { STORAGE_PROVIDER } from '../storage/storage-provider.interface';
+import type { StorageProvider } from '../storage/storage-provider.interface';
 import { parseFile } from 'music-metadata';
 import { randomUUID } from 'crypto';
 import {
@@ -68,6 +71,7 @@ export class UploadsService {
     private usageService: UsageService,
     private jobsService: JobsService,
     private eventsGateway: EventsGateway,
+    @Inject(STORAGE_PROVIDER) private storage: StorageProvider,
   ) {
     // Ensure chunks directory exists
     if (!existsSync(this.chunksBaseDir)) {
@@ -136,10 +140,10 @@ export class UploadsService {
     return 300;
   }
 
-
   async handleFileUpload(
     file: Express.Multer.File,
     user: { userId: string },
+    organizationId?: string,
     languageCode?: string,
     clientDuration?: number,
   ) {
@@ -152,17 +156,44 @@ export class UploadsService {
     // Check usage limits before proceeding
     await this.usageService.enforceUploadLimit(user.userId, durationSeconds);
 
+    // Use StorageProvider to upload
+    const finalFilename = `${Date.now()}_${file.originalname}`;
+    const storagePath = `${user.userId}/${finalFilename}`;
+    const bucket = 'recordings';
+    const fileUrl = `${bucket}/${storagePath}`;
+
+    try {
+      const fileBuffer = readFileSync(file.path);
+      await this.storage.upload(bucket, storagePath, fileBuffer, file.mimetype);
+      // Clean up temp file
+      unlinkSync(file.path);
+    } catch (error) {
+      console.error('Failed to upload file to storage:', error);
+      throw error;
+    }
+
     // Create a Meeting record
     const meeting = await this.prisma.meeting.create({
       data: {
         userId: user.userId,
+        organizationId: organizationId,
         title: file.originalname,
-        fileUrl: file.path,
+        fileUrl: fileUrl,
         originalFileName: file.originalname,
         status: 'UPLOADED',
         durationSeconds: durationSeconds,
         languageCode: languageCode || 'en',
       },
+    });
+
+    // Emit meeting:created event so frontend can add to list
+    this.eventsGateway.emitMeetingCreated(user.userId, {
+      id: meeting.id,
+      title: meeting.title,
+      status: meeting.status,
+      createdAt: meeting.createdAt,
+      durationSeconds: meeting.durationSeconds,
+      originalFileName: meeting.originalFileName,
     });
 
     // Emit pipeline step: upload complete
@@ -199,14 +230,14 @@ export class UploadsService {
   /**
    * Initiate a chunked upload session
    */
-  async initiateChunkedUpload(
+  initiateChunkedUpload(
     userId: string,
     filename: string,
     totalSize: number,
     totalChunks: number,
     mimeType: string,
     language?: string,
-  ): Promise<{ uploadId: string; chunkSize: number }> {
+  ): { uploadId: string; chunkSize: number } {
     const uploadId = randomUUID();
     const tempDir = join(this.chunksBaseDir, uploadId);
 
@@ -239,12 +270,12 @@ export class UploadsService {
   /**
    * Store a single chunk
    */
-  async storeChunk(
+  storeChunk(
     uploadId: string,
     chunkIndex: number,
     chunkData: Buffer,
     userId: string,
-  ): Promise<{ received: number; total: number; complete: boolean }> {
+  ): { received: number; total: number; complete: boolean } {
     const session = uploadSessions.get(uploadId);
 
     if (!session) {
@@ -284,6 +315,7 @@ export class UploadsService {
   async completeChunkedUpload(
     uploadId: string,
     userId: string,
+    organizationId?: string,
     language?: string,
   ): Promise<{ meetingId: string; jobId: string }> {
     const session = uploadSessions.get(uploadId);
@@ -303,13 +335,13 @@ export class UploadsService {
     }
 
     // Reassemble chunks into final file
-    const uploadsDir = join(process.cwd(), 'uploads');
-    if (!existsSync(uploadsDir)) {
-      mkdirSync(uploadsDir, { recursive: true });
+    const tempUploadsDir = join(process.cwd(), 'uploads');
+    if (!existsSync(tempUploadsDir)) {
+      mkdirSync(tempUploadsDir, { recursive: true });
     }
 
     const finalFilename = `${Date.now()}_${session.filename}`;
-    const finalPath = join(uploadsDir, finalFilename);
+    const finalPath = join(tempUploadsDir, finalFilename);
 
     // Read and concatenate all chunks in order
     const chunks: Buffer[] = [];
@@ -355,17 +387,47 @@ export class UploadsService {
     // Check usage limits
     await this.usageService.enforceUploadLimit(userId, durationSeconds);
 
+    // Use StorageProvider to upload reassembled file
+    const permanentPath = `${userId}/${Date.now()}_${session.filename}`;
+    const bucket = 'recordings';
+    const fileUrl = `${bucket}/${permanentPath}`;
+
+    try {
+      await this.storage.upload(
+        bucket,
+        permanentPath,
+        finalBuffer,
+        session.mimeType,
+      );
+      // Clean up reassembled temp file (if it was written to disk)
+      if (existsSync(finalPath)) unlinkSync(finalPath);
+    } catch (error) {
+      console.error('Failed to upload reassembled file to storage:', error);
+      throw error;
+    }
+
     // Create meeting record
     const meeting = await this.prisma.meeting.create({
       data: {
         userId,
+        organizationId,
         title: session.filename,
-        fileUrl: finalPath,
+        fileUrl: fileUrl,
         originalFileName: session.filename,
         status: 'UPLOADED',
         durationSeconds,
         languageCode: language || session.language || 'en',
       },
+    });
+
+    // Emit meeting:created event so frontend can add to list
+    this.eventsGateway.emitMeetingCreated(userId, {
+      id: meeting.id,
+      title: meeting.title,
+      status: meeting.status,
+      createdAt: meeting.createdAt,
+      durationSeconds: meeting.durationSeconds,
+      originalFileName: meeting.originalFileName,
     });
 
     // Emit pipeline step: upload complete

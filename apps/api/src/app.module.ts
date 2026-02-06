@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { SentryContextInterceptor } from './monitoring/sentry-context.interceptor';
 import { SentryModule } from '@sentry/nestjs/setup';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
@@ -22,7 +23,12 @@ import { CorrectionsModule } from './corrections/corrections.module';
 import { SegmentsModule } from './segments/segments.module';
 import { MomentsModule } from './moments/moments.module';
 import { QualityModule } from './quality/quality.module';
+import { TelegramModule } from './telegram/telegram.module';
 import { TemplatesModule } from './templates/templates.module';
+import { SupabaseModule } from './supabase/supabase.module';
+import { SearchModule } from './search/search.module';
+import { BillingModule } from './billing/billing.module';
+import { CalendarModule } from './calendar/calendar.module';
 
 @Module({
   imports: [
@@ -63,10 +69,15 @@ import { TemplatesModule } from './templates/templates.module';
     EventsModule,
     QueueModule,
     CorrectionsModule,
+    TelegramModule,
     SegmentsModule,
     MomentsModule,
     QualityModule,
     TemplatesModule,
+    SupabaseModule,
+    SearchModule,
+    BillingModule,
+    CalendarModule,
   ],
   controllers: [],
   providers: [
@@ -75,6 +86,11 @@ import { TemplatesModule } from './templates/templates.module';
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
     },
+    // Apply Sentry Context Interceptor globally
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: SentryContextInterceptor,
+    },
   ],
 })
-export class AppModule { }
+export class AppModule {}

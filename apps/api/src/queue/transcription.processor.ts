@@ -6,6 +6,8 @@ import { EventsGateway } from '../events/events.gateway';
 import { JobsService } from './jobs.service';
 import { UsageService } from '../usage/usage.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SpeakerIdentifierService } from '../speakers/speaker-identifier.service';
+import { BillingService } from '../billing/billing.service';
 
 export interface TranscriptionJobData {
   meetingId: string;
@@ -23,6 +25,8 @@ export class TranscriptionProcessor extends WorkerHost {
     private readonly jobsService: JobsService,
     private readonly usageService: UsageService,
     private readonly prisma: PrismaService,
+    private readonly speakerIdentifier: SpeakerIdentifierService,
+    private readonly billingService: BillingService,
   ) {
     super();
   }
@@ -47,6 +51,37 @@ export class TranscriptionProcessor extends WorkerHost {
 
       const result = await this.transcriptionsService.transcribe(meetingId);
 
+      // Emit progress: identifying speakers
+      this.eventsGateway.emitPipelineStep(userId, meetingId, {
+        step: 'transcription',
+        status: 'processing',
+        progress: 90,
+      });
+
+      // Auto-identify speaker names from context (non-blocking)
+      try {
+        const identified =
+          await this.speakerIdentifier.identifyFromContext(meetingId);
+        if (identified.length > 0) {
+          console.log(
+            `Identified ${identified.length} speakers for meeting ${meetingId}:`,
+            identified.map((s) => `${s.originalName} → ${s.suggestedName}`),
+          );
+        }
+      } catch (speakerError) {
+        // Don't fail pipeline on speaker identification error
+        console.error(
+          'Speaker identification failed (non-critical):',
+          speakerError,
+        );
+      }
+
+      // Update lastProcessedAt timestamp for ordering
+      await this.prisma.meeting.update({
+        where: { id: meetingId },
+        data: { lastProcessedAt: new Date() },
+      });
+
       // Emit progress: transcription complete
       this.eventsGateway.emitPipelineStep(userId, meetingId, {
         step: 'transcription',
@@ -54,19 +89,31 @@ export class TranscriptionProcessor extends WorkerHost {
         progress: 100,
       });
 
-      // Auto-trigger minutes generation unless explicitly skipped
+      // Auto-trigger enhancement generation unless explicitly skipped
       if (!skipMinutesGeneration) {
-        // Emit pipeline step: minutes starting
+        // Emit pipeline step: enhancement starting
         this.eventsGateway.emitPipelineStep(userId, meetingId, {
-          step: 'minutes',
+          step: 'enhancement',
           status: 'queued',
           progress: 0,
         });
 
-        await this.jobsService.addMinutesJob({
+        await this.jobsService.addEnhancementJob({
           meetingId,
           userId,
         });
+      }
+
+      // Report metered usage to Stripe if subscription is active
+      try {
+        const durationMinutes =
+          Math.ceil((job as any).durationSeconds / 60) || 1;
+        await this.billingService.reportUsage(userId, durationMinutes);
+      } catch (usageReportError) {
+        console.error(
+          'Failed to report usage to Stripe (non-critical):',
+          usageReportError,
+        );
       }
 
       return result;
@@ -86,10 +133,16 @@ export class TranscriptionProcessor extends WorkerHost {
           select: { durationSeconds: true },
         });
         if (meeting?.durationSeconds) {
-          await this.usageService.decrementUsage(userId, meeting.durationSeconds);
+          await this.usageService.decrementUsage(
+            userId,
+            meeting.durationSeconds,
+          );
         }
       } catch (usageError) {
-        console.error('Failed to decrement usage on transcription failure:', usageError);
+        console.error(
+          'Failed to decrement usage on transcription failure:',
+          usageError,
+        );
       }
 
       throw error;

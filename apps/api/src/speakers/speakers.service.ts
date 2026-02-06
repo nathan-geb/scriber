@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class SpeakersService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   async findByMeeting(meetingId: string, userId: string) {
     const meeting = await this.prisma.meeting.findFirst({

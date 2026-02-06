@@ -8,13 +8,17 @@ import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const logger = new Logger('Bootstrap');
+
+  // Set global API prefix
+  app.setGlobalPrefix('api/v1');
 
   // Enable CORS for web and mobile clients
   app.enableCors({
     origin: [
       'http://localhost:3000', // Next.js dev
+      'http://localhost:3002', // Next.js dev (fallback port)
       'http://localhost:8081', // Expo dev
       'http://localhost:19006', // Expo web
       process.env.WEB_URL,

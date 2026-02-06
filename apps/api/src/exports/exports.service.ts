@@ -12,20 +12,32 @@ import {
 
 @Injectable()
 export class ExportsService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
-  async generatePdf(meetingId: string): Promise<Buffer> {
+  async generatePdf(
+    meetingId: string,
+    options: { includeMinutes: boolean; includeTranscript: boolean } = {
+      includeMinutes: true,
+      includeTranscript: true,
+    },
+  ): Promise<Buffer> {
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
-      include: { minutes: true },
+      include: {
+        minutes: true,
+        transcript: {
+          orderBy: { startTime: 'asc' },
+          include: { speaker: true },
+        },
+      },
     });
 
-    if (!meeting || !meeting.minutes) {
-      throw new NotFoundException('Meeting or minutes not found');
+    if (!meeting) {
+      throw new NotFoundException('Meeting not found');
     }
 
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument();
+      const doc = new PDFDocument({ margin: 50 });
       const buffers: Buffer[] = [];
 
       doc.on('data', buffers.push.bind(buffers));
@@ -35,38 +47,137 @@ export class ExportsService {
       });
       doc.on('error', reject);
 
-      // Title
-      doc.fontSize(25).text(meeting.title, { align: 'center' });
-      doc.fontSize(12).text(`Date: ${meeting.createdAt.toLocaleDateString()}`, {
-        align: 'center',
-      });
-      doc.moveDown();
+      // Register a Unicode-compatible font (standard on macOS)
+      const unicodeFontPath = '/System/Library/Fonts/Supplemental/KefaIII.ttf';
+      doc.registerFont('Ethiopic', unicodeFontPath);
 
-      // Content
-      doc.fontSize(14).text('Minutes:', { underline: true });
-      doc.moveDown();
-      if (meeting.minutes) {
-        doc.fontSize(12).text(meeting.minutes.content);
+      // Header - Title
+      doc.font('Ethiopic').fontSize(24).text(meeting.title, { align: 'left' });
+      doc.moveDown(0.5);
+
+      // Metadata
+      doc.font('Ethiopic').fontSize(10).fillColor('#666666');
+      doc.text(`Date: ${meeting.createdAt.toLocaleDateString()}`);
+      if (meeting.transcript && meeting.transcript.length > 0) {
+        const lastSegment = meeting.transcript[meeting.transcript.length - 1];
+        doc.text(`Duration: ${this.formatTime(lastSegment.endTime)}`);
+      }
+      doc.text(`Meeting ID: ${meeting.id}`);
+      doc.moveDown(1.5);
+      doc.fillColor('#000000'); // Reset color
+
+      // Minutes Section
+      if (options.includeMinutes && meeting.minutes) {
+        doc.font('Ethiopic').fontSize(16).text('Meeting Minutes');
+        doc.moveDown(0.5);
+        doc.font('Ethiopic').fontSize(11).text(meeting.minutes.content, {
+          align: 'justify',
+          lineGap: 4,
+        });
+        doc.moveDown(1.5);
+      }
+
+      if (
+        options.includeTranscript &&
+        meeting.transcript &&
+        meeting.transcript.length > 0
+      ) {
+        // If we also included minutes, start on a new page
+        if (options.includeMinutes && meeting.minutes) {
+          doc.addPage();
+        }
+        doc.font('Ethiopic').fontSize(16).text('Full Transcript');
+        doc.moveDown(1);
+
+        for (const segment of meeting.transcript) {
+          const speaker = segment.speaker?.name || 'Unknown Speaker';
+          const time = this.formatTime(segment.startTime);
+
+          // Draw a small timestamp/speaker line
+          doc.font('Ethiopic').fontSize(10).fillColor('#4F46E5'); // Violet-600
+          doc.text(`[${time}] ${speaker}`);
+
+          doc.font('Ethiopic').fontSize(11).fillColor('#000000');
+          doc.text(segment.text, {
+            indent: 10,
+            lineGap: 3,
+          });
+          doc.moveDown(0.8);
+
+          // Check for page bottom
+          if (doc.y > 700) {
+            doc.addPage();
+          }
+        }
       }
 
       doc.end();
     });
   }
 
-  async generateText(meetingId: string): Promise<string> {
+  async generateText(
+    meetingId: string,
+    options: {
+      includeMinutes: boolean;
+      includeTranscript: boolean;
+    } = {
+      includeMinutes: true,
+      includeTranscript: true,
+    },
+  ): Promise<string> {
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
-      include: { minutes: true },
+      include: {
+        minutes: true,
+        transcript: {
+          orderBy: { startTime: 'asc' },
+          include: { speaker: true },
+        },
+      },
     });
 
-    if (!meeting || !meeting.minutes) {
-      throw new NotFoundException('Meeting or minutes not found');
+    if (!meeting) {
+      throw new NotFoundException('Meeting not found');
     }
 
-    return `Title: ${meeting.title}\nDate: ${meeting.createdAt.toLocaleDateString()}\n\n${meeting.minutes.content}`;
+    let text = `==================================================\n`;
+    text += `${meeting.title.toUpperCase()}\n`;
+    text += `Date: ${meeting.createdAt.toLocaleDateString()}\n`;
+    text += `==================================================\n\n`;
+
+    if (options.includeMinutes && meeting.minutes) {
+      text += `SUMMARY / MINUTES\n`;
+      text += `-----------------\n`;
+      text += `${meeting.minutes.content}\n\n`;
+    }
+
+    if (
+      options.includeTranscript &&
+      meeting.transcript &&
+      meeting.transcript.length > 0
+    ) {
+      text += `FULL TRANSCRIPT\n`;
+      text += `---------------\n`;
+      for (const segment of meeting.transcript) {
+        const speaker = segment.speaker?.name || 'Unknown Speaker';
+        const time = this.formatTime(segment.startTime);
+        text += `[${time}] ${speaker}: ${segment.text}\n\n`;
+      }
+    }
+
+    return text;
   }
 
-  async generateMarkdown(meetingId: string): Promise<string> {
+  async generateMarkdown(
+    meetingId: string,
+    options: {
+      includeMinutes: boolean;
+      includeTranscript: boolean;
+    } = {
+      includeMinutes: true,
+      includeTranscript: true,
+    },
+  ): Promise<string> {
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
       include: {
@@ -83,16 +194,29 @@ export class ExportsService {
     }
 
     let markdown = `# ${meeting.title}\n\n`;
-    markdown += `**Date:** ${meeting.createdAt.toLocaleDateString()}\n\n`;
-
-    if (meeting.minutes) {
-      markdown += `## Minutes\n\n${meeting.minutes.content}\n\n`;
-    }
+    markdown += `- **Date:** ${meeting.createdAt.toLocaleDateString()}\n`;
 
     if (meeting.transcript && meeting.transcript.length > 0) {
-      markdown += `## Transcript\n\n`;
+      const lastSegment = meeting.transcript[meeting.transcript.length - 1];
+      markdown += `- **Duration:** ${this.formatTime(lastSegment.endTime)}\n`;
+    }
+    markdown += `\n---\n\n`;
+
+    if (options.includeMinutes && meeting.minutes) {
+      markdown += `## Summary & Minutes\n\n${meeting.minutes.content}\n\n`;
+      if (options.includeTranscript) {
+        markdown += `---\n\n`;
+      }
+    }
+
+    if (
+      options.includeTranscript &&
+      meeting.transcript &&
+      meeting.transcript.length > 0
+    ) {
+      markdown += `## Full Transcript\n\n`;
       for (const segment of meeting.transcript) {
-        const speaker = segment.speaker?.name || 'Unknown';
+        const speaker = segment.speaker?.name || 'Unknown Speaker';
         const time = this.formatTime(segment.startTime);
         markdown += `**[${time}] ${speaker}:** ${segment.text}\n\n`;
       }
@@ -116,10 +240,11 @@ export class ExportsService {
       throw new NotFoundException('Meeting or transcript not found');
     }
 
-    let text = `Transcript: ${meeting.title}\nDate: ${meeting.createdAt.toLocaleDateString()}\n\n`;
+    let text = `TRANSCRIPT: ${meeting.title}\n`;
+    text += `Date: ${meeting.createdAt.toLocaleDateString()}\n\n`;
 
     for (const segment of meeting.transcript) {
-      const speaker = segment.speaker?.name || 'Unknown';
+      const speaker = segment.speaker?.name || 'Speaker';
       const time = this.formatTime(segment.startTime);
       text += `[${time}] ${speaker}: ${segment.text}\n`;
     }
@@ -127,7 +252,16 @@ export class ExportsService {
     return text;
   }
 
-  async generateDocx(meetingId: string): Promise<Buffer> {
+  async generateDocx(
+    meetingId: string,
+    options: {
+      includeMinutes: boolean;
+      includeTranscript: boolean;
+    } = {
+      includeMinutes: true,
+      includeTranscript: true,
+    },
+  ): Promise<Buffer> {
     const meeting = await this.prisma.meeting.findUnique({
       where: { id: meetingId },
       include: {
@@ -148,64 +282,101 @@ export class ExportsService {
     // Title
     children.push(
       new Paragraph({
-        text: meeting.title,
+        children: [
+          new TextRun({
+            text: meeting.title,
+            bold: true,
+            size: 48,
+            font: 'Kefa',
+          }),
+        ],
         heading: HeadingLevel.TITLE,
-        alignment: AlignmentType.CENTER,
+        alignment: AlignmentType.LEFT,
       }),
     );
 
-    // Date
+    // Metadata
     children.push(
       new Paragraph({
         children: [
           new TextRun({
             text: `Date: ${meeting.createdAt.toLocaleDateString()}`,
             italics: true,
+            color: '666666',
           }),
         ],
-        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
       }),
     );
 
-    children.push(new Paragraph({ text: '' })); // Spacer
-
     // Minutes section
-    if (meeting.minutes) {
+    if (options.includeMinutes && meeting.minutes) {
       children.push(
         new Paragraph({
-          text: 'Minutes',
+          children: [
+            new TextRun({
+              text: 'Summary & Minutes',
+              bold: true,
+              size: 28,
+              font: 'Kefa',
+            }),
+          ],
           heading: HeadingLevel.HEADING_1,
+          spacing: { before: 400, after: 200 },
         }),
       );
 
-      // Split minutes content by newlines
       const minutesLines = meeting.minutes.content.split('\n');
       for (const line of minutesLines) {
-        children.push(new Paragraph({ text: line }));
+        if (line.trim()) {
+          children.push(
+            new Paragraph({
+              children: [new TextRun({ text: line, font: 'Kefa' })],
+              spacing: { after: 120 },
+            }),
+          );
+        }
       }
-
-      children.push(new Paragraph({ text: '' })); // Spacer
     }
 
     // Transcript section
-    if (meeting.transcript && meeting.transcript.length > 0) {
+    if (
+      options.includeTranscript &&
+      meeting.transcript &&
+      meeting.transcript.length > 0
+    ) {
       children.push(
         new Paragraph({
-          text: 'Transcript',
+          children: [
+            new TextRun({
+              text: 'Full Transcript',
+              bold: true,
+              size: 28,
+              font: 'Kefa',
+            }),
+          ],
           heading: HeadingLevel.HEADING_1,
+          spacing: { before: 400, after: 200 },
+          pageBreakBefore: options.includeMinutes && !!meeting.minutes,
         }),
       );
 
       for (const segment of meeting.transcript) {
-        const speaker = segment.speaker?.name || 'Unknown';
+        const speaker = segment.speaker?.name || 'Speaker';
         const time = this.formatTime(segment.startTime);
         children.push(
           new Paragraph({
             children: [
-              new TextRun({ text: `[${time}] `, bold: true }),
-              new TextRun({ text: `${speaker}: `, bold: true }),
-              new TextRun({ text: segment.text }),
+              new TextRun({
+                text: `[${time}] `,
+                bold: true,
+                color: '4F46E5',
+                font: 'Kefa',
+              }),
+              new TextRun({ text: `${speaker}: `, bold: true, font: 'Kefa' }),
+              new TextRun({ text: segment.text, font: 'Kefa' }),
             ],
+            spacing: { after: 120 },
           }),
         );
       }

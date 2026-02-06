@@ -4,174 +4,125 @@ import {
   SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
-  ConnectedSocket,
-  MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { UseGuards } from '@nestjs/common';
+import { WsJwtGuard } from '../auth/ws-jwt.guard';
 import { JwtService } from '@nestjs/jwt';
 
 @WebSocketGateway({
   cors: {
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:8081',
-      'http://localhost:19006',
-      process.env.WEB_URL,
-      process.env.MOBILE_URL,
-    ].filter(Boolean),
-    credentials: true,
+    origin: '*',
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private logger = new Logger('EventsGateway');
-  private userSockets: Map<string, Set<string>> = new Map();
+  private connectedClients: Map<string, string> = new Map(); // socketId -> userId
 
-  constructor(private jwtService: JwtService) { }
+  constructor(private readonly jwtService: JwtService) { }
 
   async handleConnection(client: Socket) {
     try {
-      // Get token from handshake auth or query
       const token =
-        client.handshake.auth?.token || client.handshake.query?.token;
+        client.handshake.auth.token?.split(' ')[1] ||
+        client.handshake.headers.authorization?.split(' ')[1];
 
       if (!token) {
-        this.logger.warn(`Client ${client.id} connected without auth token`);
-        // Give a 5-second grace period for late authentication, then disconnect
-        setTimeout(() => {
-          if (!client.data?.userId) {
-            this.logger.warn(`Disconnecting unauthenticated client ${client.id}`);
-            client.disconnect(true);
-          }
-        }, 5000);
+        console.log(`Disconnecting unauthenticated client ${client.id}`);
+        client.disconnect();
         return;
       }
 
-      // Verify JWT and extract userId
-      const payload = this.jwtService.verify(token as string);
-      const userId = payload.sub as string;
+      const payload = this.jwtService.verify(token);
+      const userId = payload.sub;
 
-      // Store socket-to-user mapping
-      client.data.userId = userId;
-
-      // Add socket to user's set
-      if (!this.userSockets.has(userId)) {
-        this.userSockets.set(userId, new Set());
+      if (!userId) {
+        client.disconnect();
+        return;
       }
-      this.userSockets.get(userId)!.add(client.id);
 
-      // Join user-specific room
-      void client.join(`user:${userId}`);
-
-      this.logger.log(`Client ${client.id} connected for user ${userId}`);
-    } catch (error) {
-      this.logger.error(`Failed to authenticate socket ${client.id}:`, error);
-      // Disconnect on auth failure
-      client.disconnect(true);
+      this.connectedClients.set(client.id, userId);
+      client.join(`user:${userId}`);
+      console.log(`Client ${client.id} connected for user ${userId}`);
+    } catch (e) {
+      console.log(`Authentication failed for client ${client.id}:`, e.message);
+      client.disconnect();
     }
   }
 
   handleDisconnect(client: Socket) {
-    const userId = client.data.userId;
+    const userId = this.connectedClients.get(client.id);
     if (userId) {
-      // Remove from user's socket set
-      const userSocketSet = this.userSockets.get(userId);
-      if (userSocketSet) {
-        userSocketSet.delete(client.id);
-        if (userSocketSet.size === 0) {
-          this.userSockets.delete(userId);
-        }
-      }
-
-      this.logger.log(`Client ${client.id} disconnected for user ${userId}`);
+      this.connectedClients.delete(client.id);
+      console.log(`Client ${client.id} disconnected for user ${userId}`);
     }
   }
 
-  @SubscribeMessage('subscribe:meeting')
-  handleSubscribeMeeting(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { meetingId: string },
-  ) {
-    client.join(`meeting:${data.meetingId}`);
-    this.logger.log(
-      `Client ${client.id} subscribed to meeting ${data.meetingId}`,
-    );
-    return { subscribed: true, meetingId: data.meetingId };
+  @UseGuards(WsJwtGuard)
+  @SubscribeMessage('room:join')
+  handleJoinRoom(client: Socket, meetingId: string) {
+    client.join(`meeting:${meetingId}`);
+    return { event: 'room:joined', data: meetingId };
   }
 
-  @SubscribeMessage('unsubscribe:meeting')
-  handleUnsubscribeMeeting(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { meetingId: string },
-  ) {
-    client.leave(`meeting:${data.meetingId}`);
-    return { unsubscribed: true, meetingId: data.meetingId };
+  @UseGuards(WsJwtGuard)
+  @SubscribeMessage('room:leave')
+  handleLeaveRoom(client: Socket, meetingId: string) {
+    client.leave(`meeting:${meetingId}`);
+    return { event: 'room:left', data: meetingId };
   }
 
-  /**
-   * Emit event to a specific user (all their connected sockets)
-   */
-  emitToUser(userId: string, event: string, data: any) {
-    this.server.to(`user:${userId}`).emit(event, data);
-  }
+  // --- Pipeline progress emitters ---
 
-  /**
-   * Emit event to all subscribers of a meeting
-   */
-  emitToMeeting(meetingId: string, event: string, data: any) {
-    this.server.to(`meeting:${meetingId}`).emit(event, data);
-  }
-
-  /**
-   * Emit job progress update
-   */
-  emitJobProgress(userId: string, meetingId: string, data: any) {
-    this.emitToUser(userId, 'job:progress', data);
-    this.emitToMeeting(meetingId, 'job:progress', data);
-  }
-
-  /**
-   * Emit pipeline step progress
-   * Used to track progress through upload → transcription → minutes pipeline
-   */
   emitPipelineStep(
     userId: string,
     meetingId: string,
     data: {
-      step: 'upload' | 'transcription' | 'minutes';
-      status: 'queued' | 'processing' | 'uploading' | 'generating' | 'completed' | 'failed';
-      progress: number;
+      step:
+      | 'upload'
+      | 'transcription'
+      | 'enhancement'
+      | 'redaction'
+      | 'minutes';
+      status:
+      | 'queued'
+      | 'processing'
+      | 'uploading'
+      | 'generating'
+      | 'completed'
+      | 'failed';
+      progress?: number;
       error?: string;
     },
   ) {
-    const payload = {
-      meetingId,
-      ...data,
-      timestamp: new Date().toISOString(),
-    };
-    this.emitToUser(userId, 'job:step', payload);
-    this.emitToMeeting(meetingId, 'job:step', payload);
+    console.log(
+      `Emitting job:step to user ${userId} and meeting ${meetingId}: ${data.step} -> ${data.status}`,
+    );
+    this.server.to(`user:${userId}`).emit('job:step', { ...data, meetingId });
   }
 
-  /**
-   * Emit pipeline completion event
-   * Sent when entire pipeline finishes (all steps complete)
-   */
+  emitMeetingCreated(userId: string, meeting: any) {
+    console.log(`Emitting meeting:created to user ${userId}: ${meeting.id}`);
+    this.server.to(`user:${userId}`).emit('meeting:created', meeting);
+  }
+
+  emitMeetingUpdated(meetingId: string, meeting: any) {
+    this.server.to(`meeting:${meetingId}`).emit('meeting:updated', meeting);
+  }
+
   emitPipelineComplete(
     userId: string,
     meetingId: string,
-    data: { success: boolean; error?: string },
+    data: {
+      status: 'completed' | 'failed';
+      error?: string;
+    },
   ) {
-    const payload = {
-      meetingId,
-      ...data,
-      timestamp: new Date().toISOString(),
-    };
-    this.emitToUser(userId, 'job:complete', payload);
-    this.emitToMeeting(meetingId, 'job:complete', payload);
+    console.log(
+      `Emitting job:complete to user ${userId} and meeting ${meetingId}: ${data.status}`,
+    );
+    this.server.to(`user:${userId}`).emit('job:complete', { ...data, meetingId });
   }
 }

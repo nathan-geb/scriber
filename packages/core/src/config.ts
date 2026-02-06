@@ -3,8 +3,9 @@
  * This provides centralized API URLs and other configuration values.
  */
 
-// Detect environment
-const isDev = process.env.NODE_ENV === 'development';
+// Detect environment - use __DEV__ for React Native compatibility
+declare const __DEV__: boolean | undefined;
+const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : process.env.NODE_ENV === 'development';
 const isServer = typeof window === 'undefined';
 
 /**
@@ -41,7 +42,7 @@ export const config = {
     /**
      * Base URL for the API server
      */
-    apiUrl: getEnv('API_URL', isDev ? 'http://localhost:3001' : 'https://api.echomint.app'),
+    apiUrl: getEnv('API_URL', isDev ? 'http://localhost:3001/api/v1' : 'https://api.echomint.app/api/v1'),
 
     /**
      * WebSocket URL for real-time updates
@@ -61,7 +62,7 @@ export const config = {
     /**
      * Maximum file size for uploads (in bytes)
      */
-    maxFileSize: 25 * 1024 * 1024, // 25MB
+    maxFileSize: 500 * 1024 * 1024, // 500MB
 
     /**
      * Supported audio file extensions

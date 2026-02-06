@@ -15,7 +15,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 @Controller('jobs')
 @UseGuards(JwtAuthGuard)
 export class JobsController {
-  constructor(private readonly jobsService: JobsService) { }
+  constructor(private readonly jobsService: JobsService) {}
 
   @Get()
   async getMyActiveJobs(@Request() req: { user: { userId: string } }) {
@@ -25,7 +25,12 @@ export class JobsController {
   @Get(':id')
   async getJobStatus(
     @Param('id') id: string,
-    @Query('type') type: 'transcription' | 'minutes' = 'transcription',
+    @Query('type')
+    type:
+      | 'transcription'
+      | 'minutes'
+      | 'enhancement'
+      | 'redaction' = 'transcription',
   ) {
     const job = await this.jobsService.getJobStatus(id, type);
     if (!job) {

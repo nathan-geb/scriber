@@ -1,11 +1,18 @@
-import { Controller, Get, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  UseGuards,
+  Request,
+  UseInterceptors,
+} from '@nestjs/common';
 import { UsageService } from './usage.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { CacheInterceptor, CacheTTL } from '@nestjs/cache-manager';
 
 @Controller('users/usage')
 @UseGuards(JwtAuthGuard)
 export class UsageController {
-  constructor(private readonly usageService: UsageService) { }
+  constructor(private readonly usageService: UsageService) {}
 
   @Get()
   async getUsage(@Request() req: { user: { userId: string } }) {

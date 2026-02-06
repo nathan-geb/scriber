@@ -52,7 +52,7 @@ export class MinutesProcessor extends WorkerHost {
 
       // Emit pipeline complete event - entire pipeline finished successfully
       this.eventsGateway.emitPipelineComplete(userId, meetingId, {
-        success: true,
+        status: 'completed',
       });
 
       return result;
@@ -67,7 +67,7 @@ export class MinutesProcessor extends WorkerHost {
 
       // Emit pipeline complete with failure
       this.eventsGateway.emitPipelineComplete(userId, meetingId, {
-        success: false,
+        status: 'failed',
         error: error instanceof Error ? error.message : 'Unknown error',
       });
 

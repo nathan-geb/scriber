@@ -4,9 +4,9 @@ import { CorrectionsService } from './corrections.service';
 import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
-    imports: [PrismaModule],
-    controllers: [CorrectionsController],
-    providers: [CorrectionsService],
-    exports: [CorrectionsService],
+  imports: [PrismaModule],
+  controllers: [CorrectionsController],
+  providers: [CorrectionsService],
+  exports: [CorrectionsService],
 })
-export class CorrectionsModule { }
+export class CorrectionsModule {}

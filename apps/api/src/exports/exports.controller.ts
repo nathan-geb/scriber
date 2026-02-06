@@ -5,6 +5,7 @@ import {
   Res,
   NotFoundException,
   UseGuards,
+  Query,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ExportsService } from './exports.service';
@@ -13,19 +14,27 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 @Controller('exports')
 @UseGuards(JwtAuthGuard)
 export class ExportsController {
-  constructor(private readonly exportsService: ExportsService) { }
+  constructor(private readonly exportsService: ExportsService) {}
 
   @Get(':meetingId/pdf')
   async downloadPdf(
     @Param('meetingId') meetingId: string,
+    @Query('include') include: string,
     @Res() res: Response,
   ) {
     try {
-      const pdfBuffer = await this.exportsService.generatePdf(meetingId);
+      const options = {
+        includeMinutes: !include || include.includes('minutes'),
+        includeTranscript: !include || include.includes('transcript'),
+      };
+      const pdfBuffer = await this.exportsService.generatePdf(
+        meetingId,
+        options,
+      );
 
       res.set({
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="minutes-${meetingId}.pdf"`,
+        'Content-Disposition': `attachment; filename="meeting-${meetingId}.pdf"`,
         'Content-Length': pdfBuffer.length,
       });
 
@@ -42,14 +51,22 @@ export class ExportsController {
   @Get(':meetingId/text')
   async downloadText(
     @Param('meetingId') meetingId: string,
+    @Query('include') include: string,
     @Res() res: Response,
   ) {
     try {
-      const textContent = await this.exportsService.generateText(meetingId);
+      const options = {
+        includeMinutes: !include || include.includes('minutes'),
+        includeTranscript: !include || include.includes('transcript'),
+      };
+      const textContent = await this.exportsService.generateText(
+        meetingId,
+        options,
+      );
 
       res.set({
         'Content-Type': 'text/plain',
-        'Content-Disposition': `attachment; filename="minutes-${meetingId}.txt"`,
+        'Content-Disposition': `attachment; filename="meeting-${meetingId}.txt"`,
       });
 
       res.send(textContent);
@@ -65,10 +82,18 @@ export class ExportsController {
   @Get(':meetingId/markdown')
   async downloadMarkdown(
     @Param('meetingId') meetingId: string,
+    @Query('include') include: string,
     @Res() res: Response,
   ) {
     try {
-      const markdown = await this.exportsService.generateMarkdown(meetingId);
+      const options = {
+        includeMinutes: !include || include.includes('minutes'),
+        includeTranscript: !include || include.includes('transcript'),
+      };
+      const markdown = await this.exportsService.generateMarkdown(
+        meetingId,
+        options,
+      );
 
       res.set({
         'Content-Type': 'text/markdown',
@@ -112,10 +137,18 @@ export class ExportsController {
   @Get(':meetingId/docx')
   async downloadDocx(
     @Param('meetingId') meetingId: string,
+    @Query('include') include: string,
     @Res() res: Response,
   ) {
     try {
-      const docxBuffer = await this.exportsService.generateDocx(meetingId);
+      const options = {
+        includeMinutes: !include || include.includes('minutes'),
+        includeTranscript: !include || include.includes('transcript'),
+      };
+      const docxBuffer = await this.exportsService.generateDocx(
+        meetingId,
+        options,
+      );
 
       res.set({
         'Content-Type':

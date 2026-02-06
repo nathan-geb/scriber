@@ -5,51 +5,68 @@ import {
   Body,
   Request,
   UseGuards,
+  ForbiddenException,
+  Param,
+  Patch,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { ForbiddenException, Param, Patch } from '@nestjs/common';
 
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) { }
+  constructor(private readonly usersService: UsersService) {}
 
   @UseGuards(JwtAuthGuard)
   @Get('profile')
-  async getProfile(@Request() req: any) {
-    return this.usersService.findOne(req.user.email);
+  async getProfile(@Request() req: { user: { email: string } }) {
+    return await this.usersService.findOne(req.user.email);
   }
 
   @UseGuards(JwtAuthGuard)
   @Post('push-token')
-  async updatePushToken(@Request() req: any, @Body('token') token: string) {
-    return this.usersService.setPushToken(req.user.id, token);
+  async updatePushToken(
+    @Request() req: { user: { userId: string } },
+    @Body('token') token: string,
+  ) {
+    return await this.usersService.setPushToken(req.user.userId, token);
   }
 
   @UseGuards(JwtAuthGuard)
   @Post('notifications')
   async updateNotificationSettings(
-    @Request() req: any,
+    @Request() req: { user: { userId: string } },
     @Body() settings: { email?: boolean; push?: boolean },
   ) {
-    return this.usersService.updateNotificationSettings(req.user.id, settings);
+    return await this.usersService.updateNotificationSettings(
+      req.user.userId,
+      settings,
+    );
   }
 
   @UseGuards(JwtAuthGuard)
   @Get()
-  async findAll(@Request() req: any) {
+  async findAll(@Request() req: { user: { role: string } }) {
     if (req.user.role !== 'ADMIN') throw new ForbiddenException('Admin only');
-    return this.usersService.findAllUsers();
+    return await this.usersService.findAllUsers();
   }
 
   @UseGuards(JwtAuthGuard)
   @Patch(':id/status')
   async updateStatus(
-    @Request() req: any,
+    @Request() req: { user: { role: string } },
     @Param('id') id: string,
     @Body('isActive') isActive: boolean,
   ) {
     if (req.user.role !== 'ADMIN') throw new ForbiddenException('Admin only');
-    return this.usersService.updateStatus(id, isActive);
+    return await this.usersService.updateStatus(id, isActive);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('telegram-link')
+  async generateTelegramLink(@Request() req: { user: { userId: string } }) {
+    const code = await this.usersService.generateTelegramLinkCode(
+      req.user.userId,
+    );
+    return { code };
   }
 }

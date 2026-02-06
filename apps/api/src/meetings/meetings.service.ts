@@ -1,10 +1,16 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Prisma, MeetingStatus } from '@prisma/client';
+import { Prisma, MeetingStatus } from '../generated/client';
+import { SearchService } from '../search/search.service';
 import { unlink } from 'fs/promises';
 import { existsSync } from 'fs';
+import { STORAGE_PROVIDER } from '../storage/storage-provider.interface';
+import type { StorageProvider } from '../storage/storage-provider.interface';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 
 export interface MeetingFilters {
+  organizationId?: string;
   search?: string;
   status?: string;
   startDate?: Date;
@@ -22,21 +28,54 @@ export interface PaginatedMeetings {
 
 @Injectable()
 export class MeetingsService {
-  constructor(private prisma: PrismaService) { }
+  private readonly logger = new Logger(MeetingsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private searchService: SearchService,
+    @Inject(STORAGE_PROVIDER) private storage: StorageProvider,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+  ) { }
 
   async findAll(
     userId: string,
     filters?: MeetingFilters,
   ): Promise<PaginatedMeetings> {
-    const where: Prisma.MeetingWhereInput = { userId };
+    const cacheKey = `meetings:${userId}:list:${JSON.stringify(filters || {})}`;
+    const cached = await this.cacheManager.get<PaginatedMeetings>(cacheKey);
+    if (cached) return cached;
+
+    const where: Prisma.MeetingWhereInput = {};
+
+    if (filters?.organizationId) {
+      (where as any).organizationId = filters.organizationId;
+    } else {
+      where.userId = userId;
+    }
     const limit = filters?.limit ?? 20;
 
-    // Apply search filter
+    // Apply search filter (Old Prisma-based search - keeping for reference or fallback)
+    /*
     if (filters?.search) {
       where.OR = [
         { title: { contains: filters.search, mode: 'insensitive' } },
         { originalFileName: { contains: filters.search, mode: 'insensitive' } },
       ];
+    }
+    */
+
+    // Meilisearch-powered search
+    if (filters?.search) {
+      const searchResults = await this.searchService.search(filters.search, {
+        organizationId: filters.organizationId,
+        userId: filters.organizationId ? undefined : userId,
+      });
+
+      const resultIds = searchResults.hits.map((hit) => hit.id);
+      if (resultIds.length === 0) {
+        return { items: [], nextCursor: undefined, hasMore: false };
+      }
+      where.id = { in: resultIds };
     }
 
     // Apply status filter
@@ -83,12 +122,25 @@ export class MeetingsService {
     const items = hasMore ? meetings.slice(0, -1) : meetings;
     const nextCursor = hasMore ? items[items.length - 1]?.id : undefined;
 
-    return { items, nextCursor, hasMore };
+    const result = { items, nextCursor, hasMore };
+    await this.cacheManager.set(cacheKey, result, 30000); // 30s TTL
+    return result;
   }
 
-  async findOne(id: string, userId: string) {
-    const meeting = await this.prisma.meeting.findFirst({
-      where: { id, userId },
+  async findOne(id: string, userId: string, organizationId?: string) {
+    const cacheKey = `meetings:${userId}:detail:${id}`;
+    const cached = await this.cacheManager.get(cacheKey);
+    if (cached) return cached;
+
+    const where: Prisma.MeetingWhereInput = { id };
+    if (organizationId) {
+      where.organizationId = organizationId;
+    } else {
+      where.userId = userId;
+    }
+
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where,
       include: {
         transcript: {
           orderBy: { startTime: 'asc' },
@@ -103,10 +155,9 @@ export class MeetingsService {
     });
 
     if (!meeting) throw new NotFoundException('Meeting not found');
+    await this.cacheManager.set(cacheKey, meeting, 30000); // 30s TTL
     return meeting;
   }
-
-  private readonly logger = new Logger(MeetingsService.name);
 
   async delete(id: string, userId: string) {
     // Verify ownership and get file path
@@ -134,13 +185,19 @@ export class MeetingsService {
   }
 
   /**
-   * Safely delete a file from disk. Logs errors but doesn't throw.
+   * Safely delete a file from storage. Logs errors but doesn't throw.
    */
   private async cleanupFile(filePath: string): Promise<void> {
     try {
-      if (existsSync(filePath)) {
+      if (filePath.startsWith('recordings/')) {
+        const parts = filePath.split('/');
+        const bucket = parts[0];
+        const path = parts.slice(1).join('/');
+        await this.storage.delete(bucket, path);
+        this.logger.log(`Deleted storage file: ${filePath}`);
+      } else if (existsSync(filePath)) {
         await unlink(filePath);
-        this.logger.log(`Deleted file: ${filePath}`);
+        this.logger.log(`Deleted local file: ${filePath}`);
       }
     } catch (error) {
       this.logger.warn(`Failed to delete file ${filePath}:`, error);
@@ -164,28 +221,36 @@ export class MeetingsService {
     const meetings = await this.prisma.meeting.findMany({
       where: {
         id: { in: ids },
-        userId
+        userId,
       },
-      select: { id: true, fileUrl: true }
+      select: { id: true, fileUrl: true },
     });
 
-    const validIds = meetings.map(m => m.id);
+    const validIds = meetings.map((m) => m.id);
 
     if (validIds.length === 0) return { count: 0 };
 
     // Perform deletions in transaction
     await this.prisma.$transaction([
-      this.prisma.transcriptSegment.deleteMany({ where: { meetingId: { in: validIds } } }),
-      this.prisma.minutes.deleteMany({ where: { meetingId: { in: validIds } } }),
-      this.prisma.speaker.deleteMany({ where: { meetingId: { in: validIds } } }),
+      this.prisma.transcriptSegment.deleteMany({
+        where: { meetingId: { in: validIds } },
+      }),
+      this.prisma.minutes.deleteMany({
+        where: { meetingId: { in: validIds } },
+      }),
+      this.prisma.speaker.deleteMany({
+        where: { meetingId: { in: validIds } },
+      }),
       this.prisma.meeting.deleteMany({ where: { id: { in: validIds } } }),
     ]);
 
     // Clean up audio files from disk (non-blocking)
     for (const meeting of meetings) {
-      if (meeting.fileUrl) {
-        void this.cleanupFile(meeting.fileUrl);
-      }
+    }
+
+    // Invalidate caches
+    for (const id of validIds) {
+      await this.cacheManager.del(`meetings:${userId}:detail:${id}`);
     }
 
     return { count: validIds.length };
@@ -199,10 +264,36 @@ export class MeetingsService {
 
     if (!meeting) throw new NotFoundException('Meeting not found');
 
-    return this.prisma.meeting.update({
+    const updated = await (this.prisma.meeting as any).update({
       where: { id },
       data: { title },
-      select: { id: true, title: true },
+      include: { minutes: true },
     });
+
+    // Async sync to search index
+    await this.searchService.indexMeeting(updated, updated.minutes);
+
+    await this.cacheManager.del(`meetings:${userId}:detail:${id}`);
+    return { id: updated.id, title: updated.title };
+  }
+
+  async updateStatus(id: string, userId: string, status: MeetingStatus) {
+    // Verify ownership
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id, userId },
+    });
+
+    if (!meeting) throw new NotFoundException('Meeting not found');
+
+    await this.cacheManager.del(`meetings:${userId}:detail:${id}`);
+    return this.prisma.meeting.update({
+      where: { id },
+      data: { status },
+      select: { id: true, status: true },
+    });
+  }
+
+  async getSignedUrl(bucket: string, path: string, expiresIn?: number) {
+    return this.storage.getSignedUrl(bucket, path, expiresIn);
   }
 }

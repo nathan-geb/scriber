@@ -15,14 +15,19 @@ import {
   Header,
   StreamableFile,
   NotFoundException,
+  UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { MeetingsService } from './meetings.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { createReadStream, statSync, existsSync } from 'fs';
 import { join } from 'path';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { MemberRolesGuard } from '../auth/guards/member-roles.guard';
+import { CacheInterceptor, CacheTTL } from '@nestjs/cache-manager';
 
 interface MeetingQueryParams {
+  organizationId?: string;
   search?: string;
   status?: string;
   startDate?: string;
@@ -35,19 +40,21 @@ interface MeetingQueryParams {
 import { JobsService } from '../queue/jobs.service';
 
 @Controller('meetings')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, MemberRolesGuard)
 export class MeetingsController {
   constructor(
     private readonly meetingsService: MeetingsService,
     private readonly jobsService: JobsService,
-  ) { }
+  ) {}
 
   @Get()
+  @Roles('VIEWER')
   async findAll(
     @Request() req: { user: { userId: string } },
     @Query() query: MeetingQueryParams,
   ) {
     return this.meetingsService.findAll(req.user.userId, {
+      organizationId: query.organizationId,
       search: query.search,
       status: query.status,
       startDate: query.startDate ? new Date(query.startDate) : undefined,
@@ -58,15 +65,32 @@ export class MeetingsController {
     });
   }
 
+  @Get('search')
+  @Roles('VIEWER')
+  async search(
+    @Request() req: { user: { userId: string } },
+    @Query('q') query: string,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.meetingsService.findAll(req.user.userId, {
+      search: query,
+      organizationId,
+      limit: 50,
+    });
+  }
+
   @Get(':id')
+  @Roles('VIEWER')
   async findOne(
     @Param('id') id: string,
     @Request() req: { user: { userId: string } },
+    @Query('organizationId') organizationId?: string,
   ) {
-    return this.meetingsService.findOne(id, req.user.userId);
+    return this.meetingsService.findOne(id, req.user.userId, organizationId);
   }
 
   @Patch(':id')
+  @Roles('MEMBER')
   async update(
     @Param('id') id: string,
     @Request() req: { user: { userId: string } },
@@ -79,16 +103,26 @@ export class MeetingsController {
   }
 
   @Get(':id/audio')
+  @Roles('VIEWER')
   @Header('Accept-Ranges', 'bytes')
   async streamAudio(
     @Param('id') id: string,
     @Request() req: { user: { userId: string }; headers: { range?: string } },
     @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
+  ): Promise<StreamableFile | void> {
     const meeting = await this.meetingsService.findOne(id, req.user.userId);
 
     if (!meeting.fileUrl) {
       throw new NotFoundException('Audio file not found');
+    }
+
+    // Handle Supabase paths - Redirect to signed URL
+    if (meeting.fileUrl.startsWith('recordings/')) {
+      const signedUrl = await this.meetingsService.getSignedUrl(
+        'recordings',
+        meeting.fileUrl,
+      );
+      return res.redirect(signedUrl);
     }
 
     // Resolve file path - fileUrl can be:
@@ -101,19 +135,25 @@ export class MeetingsController {
     if (meeting.fileUrl.startsWith('/')) {
       // Absolute path
       filePath = meeting.fileUrl;
-    } else if (meeting.fileUrl.startsWith('./apps/') || meeting.fileUrl.startsWith('apps/')) {
+    } else if (
+      meeting.fileUrl.startsWith('./apps/') ||
+      meeting.fileUrl.startsWith('apps/')
+    ) {
       // Full relative path from monorepo root
       const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
       filePath = join(process.cwd(), '..', '..', cleanPath);
-    } else if (meeting.fileUrl.startsWith('./uploads/') || meeting.fileUrl.startsWith('uploads/')) {
+    } else if (
+      meeting.fileUrl.startsWith('./uploads/') ||
+      meeting.fileUrl.startsWith('uploads/')
+    ) {
       // Relative path from API folder (new format from fixed multer config)
       const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
       filePath = join(process.cwd(), cleanPath);
     } else {
       // Just filename - check multiple possible locations
       const possiblePaths = [
-        join(process.cwd(), 'uploads', meeting.fileUrl),                    // ./uploads/
-        join(process.cwd(), 'apps', 'api', 'uploads', meeting.fileUrl),     // ./apps/api/uploads/ (legacy nested)
+        join(process.cwd(), 'uploads', meeting.fileUrl), // ./uploads/
+        join(process.cwd(), 'apps', 'api', 'uploads', meeting.fileUrl), // ./apps/api/uploads/ (legacy nested)
       ];
 
       for (const path of possiblePaths) {
@@ -174,6 +214,7 @@ export class MeetingsController {
   }
 
   @Delete(':id')
+  @Roles('ADMIN')
   @HttpCode(HttpStatus.NO_CONTENT)
   async delete(
     @Param('id') id: string,
@@ -183,12 +224,41 @@ export class MeetingsController {
   }
 
   @Post('batch-delete')
+  @Roles('ADMIN')
   @HttpCode(HttpStatus.OK)
   async deleteMany(
     @Request() req: { user: { userId: string } },
     @Body('ids') ids: string[],
   ) {
     return this.meetingsService.deleteMany(ids, req.user.userId);
+  }
+
+  @Post(':id/cancel')
+  async cancelJob(
+    @Param('id') id: string,
+    @Request() req: { user: { userId: string } },
+  ) {
+    // Verify meeting exists and belongs to user
+    const meeting = await this.meetingsService.findOne(id, req.user.userId);
+
+    // Only allow cancelling processing meetings
+    const processingStatuses = [
+      'UPLOADING',
+      'UPLOADED',
+      'PROCESSING_TRANSCRIPT',
+      'PROCESSING_MINUTES',
+    ];
+    if (!processingStatuses.includes(meeting.status)) {
+      return {
+        success: false,
+        message: 'Only processing meetings can be cancelled',
+      };
+    }
+
+    // Update status to CANCELLED
+    await this.meetingsService.updateStatus(id, req.user.userId, 'CANCELLED');
+
+    return { success: true, message: 'Meeting cancelled' };
   }
 
   @Get(':id/status')
@@ -203,11 +273,11 @@ export class MeetingsController {
       status: meeting.status,
       job: job
         ? {
-          id: job.id,
-          state: job.state,
-          progress: job.progress,
-          name: job.name,
-        }
+            id: job.id,
+            state: job.state,
+            progress: job.progress,
+            name: job.name,
+          }
         : null,
     };
   }
@@ -219,8 +289,59 @@ export class MeetingsController {
   ) {
     // Verify meeting exists and belongs to user
     const meeting = await this.meetingsService.findOne(id, req.user.userId);
-    if (meeting.status !== 'FAILED') {
-      return { success: false, message: 'Only failed meetings can be retried' };
+
+    // Allow retrying FAILED or CANCELLED meetings
+    if (meeting.status !== 'FAILED' && meeting.status !== 'CANCELLED') {
+      return {
+        success: false,
+        message: 'Only failed or cancelled meetings can be retried',
+      };
+    }
+
+    if (!meeting.fileUrl) {
+      return {
+        success: false,
+        message: 'FILE_MISSING',
+        details: 'No file URL associated with this meeting.',
+      };
+    }
+
+    // Check if file exists before retrying
+    // Similar to streamAudio path resolution logic
+    let filePath: string = '';
+    if (meeting.fileUrl.startsWith('/')) {
+      filePath = meeting.fileUrl;
+    } else if (
+      meeting.fileUrl.startsWith('./apps/') ||
+      meeting.fileUrl.startsWith('apps/')
+    ) {
+      const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
+      filePath = join(process.cwd(), '..', '..', cleanPath);
+    } else if (
+      meeting.fileUrl.startsWith('./uploads/') ||
+      meeting.fileUrl.startsWith('uploads/')
+    ) {
+      const cleanPath = meeting.fileUrl.replace(/^\.\//, '');
+      filePath = join(process.cwd(), cleanPath);
+    } else {
+      const possiblePaths = [
+        join(process.cwd(), 'uploads', meeting.fileUrl),
+        join(process.cwd(), 'apps', 'api', 'uploads', meeting.fileUrl),
+      ];
+      for (const path of possiblePaths) {
+        if (existsSync(path)) {
+          filePath = path;
+          break;
+        }
+      }
+    }
+
+    if (!filePath || !existsSync(filePath)) {
+      return {
+        success: false,
+        message: 'FILE_MISSING', // Specific code for UI to handle
+        details: 'The original audio file was deleted or lost.',
+      };
     }
 
     const result = await this.jobsService.retryJob(id, req.user.userId);
@@ -236,5 +357,28 @@ export class MeetingsController {
       message: 'Job restarted',
       jobId: result.id,
     };
+  }
+
+  @Get(':id/signed-url')
+  async getSignedUrl(
+    @Param('id') id: string,
+    @Request() req: { user: { userId: string } },
+  ) {
+    const meeting = await this.meetingsService.findOne(id, req.user.userId);
+    if (!meeting.fileUrl) {
+      throw new NotFoundException('No file associated with this meeting');
+    }
+
+    // If it's a Supabase path
+    if (meeting.fileUrl.startsWith('recordings/')) {
+      const url = await this.meetingsService.getSignedUrl(
+        'recordings',
+        meeting.fileUrl,
+      );
+      return { url };
+    }
+
+    // For legacy local files
+    return { url: `/api/meetings/${id}/audio` };
   }
 }

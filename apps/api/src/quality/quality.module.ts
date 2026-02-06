@@ -4,9 +4,9 @@ import { QualityService } from './quality.service';
 import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
-    imports: [PrismaModule],
-    controllers: [QualityController],
-    providers: [QualityService],
-    exports: [QualityService],
+  imports: [PrismaModule],
+  controllers: [QualityController],
+  providers: [QualityService],
+  exports: [QualityService],
 })
-export class QualityModule { }
+export class QualityModule {}

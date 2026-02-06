@@ -27,37 +27,48 @@ class UpdateTagDto {
 @Controller('tags')
 @UseGuards(JwtAuthGuard)
 export class TagsController {
-  constructor(private readonly tagsService: TagsService) { }
+  constructor(private readonly tagsService: TagsService) {}
 
   @Get()
-  async findAll(@Request() req: { user: { userId: string } }) {
-    return this.tagsService.findAll(req.user.userId);
+  async findAll(@Request() req: { user: { userId: string; orgId?: string } }) {
+    return this.tagsService.findAll(req.user.userId, req.user.orgId);
   }
 
   @Post()
   async create(
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
     @Body() dto: CreateTagDto,
   ) {
-    return this.tagsService.create(req.user.userId, dto.name, dto.color);
+    return this.tagsService.create(
+      req.user.userId,
+      dto.name,
+      req.user.orgId,
+      dto.color,
+    );
   }
 
   @Patch(':id')
   async update(
     @Param('id') id: string,
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
     @Body() dto: UpdateTagDto,
   ) {
-    return this.tagsService.update(id, req.user.userId, dto.name, dto.color);
+    return this.tagsService.update(
+      id,
+      req.user.userId,
+      req.user.orgId,
+      dto.name,
+      dto.color,
+    );
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async delete(
     @Param('id') id: string,
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
   ) {
-    await this.tagsService.delete(id, req.user.userId);
+    await this.tagsService.delete(id, req.user.userId, req.user.orgId);
   }
 }
 
@@ -65,23 +76,32 @@ export class TagsController {
 @Controller('meetings')
 @UseGuards(JwtAuthGuard)
 export class MeetingTagsController {
-  constructor(private readonly tagsService: TagsService) { }
+  constructor(private readonly tagsService: TagsService) {}
 
   @Get(':meetingId/tags')
   async getMeetingTags(
     @Param('meetingId') meetingId: string,
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
   ) {
-    return this.tagsService.getMeetingTags(meetingId, req.user.userId);
+    return this.tagsService.getMeetingTags(
+      meetingId,
+      req.user.userId,
+      req.user.orgId,
+    );
   }
 
   @Post(':meetingId/tags/:tagId')
   async addTagToMeeting(
     @Param('meetingId') meetingId: string,
     @Param('tagId') tagId: string,
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
   ) {
-    return this.tagsService.addTagToMeeting(meetingId, tagId, req.user.userId);
+    return this.tagsService.addTagToMeeting(
+      meetingId,
+      tagId,
+      req.user.userId,
+      req.user.orgId,
+    );
   }
 
   @Delete(':meetingId/tags/:tagId')
@@ -89,12 +109,13 @@ export class MeetingTagsController {
   async removeTagFromMeeting(
     @Param('meetingId') meetingId: string,
     @Param('tagId') tagId: string,
-    @Request() req: { user: { userId: string } },
+    @Request() req: { user: { userId: string; orgId?: string } },
   ) {
     await this.tagsService.removeTagFromMeeting(
       meetingId,
       tagId,
       req.user.userId,
+      req.user.orgId,
     );
   }
 }

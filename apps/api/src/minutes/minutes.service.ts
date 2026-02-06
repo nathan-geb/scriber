@@ -4,6 +4,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { withGeminiRetry } from '../common/gemini-retry';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventsGateway } from '../events/events.gateway';
+import { SearchService } from '../search/search.service';
 
 export type MinutesTemplate =
   | 'EXECUTIVE'
@@ -13,21 +14,24 @@ export type MinutesTemplate =
   | 'GENERAL_SUMMARY';
 
 const TEMPLATE_PROMPTS: Record<MinutesTemplate, string> = {
-  GENERAL_SUMMARY: `You are an expert meeting secretary. Generate a clear, narrative summary of this meeting.
-    
+  GENERAL_SUMMARY: `You are an expert meeting secretary. Generate a high-quality, professional summary of this meeting.
+
     Format in Markdown:
     # Meeting Summary
-    
+
     ## Overview
-    A flowing narrative (3-5 paragraphs) describing what was discussed in the meeting.
-    Write in a natural, readable style - not bullet points.
-    
+    A concise narrative (3-5 paragraphs) describing the core discussions and outcomes.
+    Avoid "fluff" or generic phrases like "The meeting started with...". 
+    Focus on specific details: names, dates, numbers, and key arguments presented.
+    Write in a natural, sophisticated business style.
+
     ## Key Takeaways
-    3-5 bullet points of the most important information from the meeting.
-    
+    3-5 bullet points of the most critical information.
+    - Focus on facts and conclusions, not just topics.
+
     ## Participants
     List the speakers identified in the transcript.
-    
+
     Do NOT include action items or tasks - this is purely an informational summary.`,
 
   EXECUTIVE: `You are an expert meeting secretary. Generate a concise executive summary.
@@ -97,6 +101,7 @@ export class MinutesService {
     private prisma: PrismaService,
     private notifications: NotificationsService,
     private eventsGateway: EventsGateway,
+    private searchService: SearchService,
   ) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
@@ -172,12 +177,13 @@ export class MinutesService {
         clearInterval(progressInterval);
 
         // Save Minutes
-        const minutes = await this.prisma.minutes.upsert({
+        const minutes = await (this.prisma.minutes as any).upsert({
           where: { meetingId },
-          update: { content },
+          update: { content, status: 'DRAFT' },
           create: {
             meetingId,
             content,
+            status: 'DRAFT',
           },
         });
 
@@ -201,6 +207,9 @@ export class MinutesService {
           `Your meeting minutes for "${meeting.title}" are ready.\n\nSummary: \n${content.substring(0, 200)}...`,
         );
 
+        // Update search index
+        await this.searchService.indexMeeting(meeting, minutes);
+
         return minutes;
       } catch (error) {
         clearInterval(progressInterval);
@@ -216,38 +225,92 @@ export class MinutesService {
     }
   }
 
+  /*
+## Phase 1: Enterprise Foundation (Completed)
+
+Successfully established multi-tenancy and organization-level scoping across the backend.
+
+### Key Changes
+- **Database Schema**: Introduced `Organization` and `Membership` models.
+- **Authentication**: JWT now carries `organizationId`.
+- **Scoping**: Meetings, Uploads, and Tags are now filtered by `organizationId`.
+
+## Phase 2: AI Quality & Reliability (Completed)
+
+Focused on improving the core AI value prop by moving from regex-based logic to LLM-driven intelligence and adding a collaborative workflow for minutes.
+
+### 1. Minutes Review Workflow
+- **Schema Update**: Added `MinutesStatus` (`DRAFT`, `UNDER_REVIEW`, `APPROVED`) and `reviewerId`.
+- **Backend Flow**: Updated `MinutesService` and `MinutesController` to support the review lifecycle.
+- **Organization Scoping**: Ensured all minutes operations are properly scoped by `organizationId`.
+
+### 2. Transcription Quality & Robustness
+- **Parallel Chunking**: Optimized `TranscriptionsService` to handle long audio files more reliably.
+- **Error Handling**: Implemented retry logic for audio chunks and context-aware continuation segments (last 5 segments).
+- **Speaker Consistency**: improved context passing between chunks to help Gemini maintain speaker identities.
+
+### 3. LLM-Powered Moment Extraction
+- **Refactor**: Replaced fragile regex-based keyword matching with a sophisticated Gemini 2.0 Flash prompt.
+- **Accuracy**: Moments now capture context, speaker intent, and nuance that regex missed.
+
+### Code Changes (Phase 2 summary)
+render_diffs(file:///Users/nathan/Documents/Projects/Developments/Scriber/apps/api/src/minutes/minutes.service.ts)
+render_diffs(file:///Users/nathan/Documents/Projects/Developments/Scriber/apps/api/src/transcriptions/transcriptions.service.ts)
+render_diffs(file:///Users/nathan/Documents/Projects/Developments/Scriber/apps/api/src/moments/moments.service.ts)
+*/
   async regenerateMinutes(
     meetingId: string,
     userId: string,
     template: MinutesTemplate,
+    organizationId?: string,
   ) {
-    // Verify ownership
-    const meeting = await this.prisma.meeting.findFirst({
-      where: { id: meetingId, userId },
+    // Verify ownership/access
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
     });
     if (!meeting) throw new NotFoundException('Meeting not found');
 
     return this.generateMinutes(meetingId, template);
   }
 
-  async getMinutes(meetingId: string) {
-    const minutes = await this.prisma.minutes.findUnique({
+  async getMinutes(meetingId: string, userId: string, organizationId?: string) {
+    // Verify access
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+    });
+    if (!meeting) throw new NotFoundException('Meeting not found');
+
+    const minutes = await (this.prisma.minutes as any).findUnique({
       where: { meetingId },
     });
-    // If not found, check if we should return 404 or null. Controller can handle.
     return minutes;
   }
 
-  async updateMinutes(meetingId: string, content: string) {
+  async updateMinutes(
+    meetingId: string,
+    userId: string,
+    content: string,
+    organizationId?: string,
+  ) {
+    // Verify access
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+    });
+    if (!meeting) throw new NotFoundException('Meeting not found');
+
     // Save current version before updating
-    const existing = await this.prisma.minutes.findUnique({
+    const existing = await (this.prisma.minutes as any).findUnique({
       where: { meetingId },
       include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
     });
 
     if (existing) {
-      // First edit: existing content becomes v1 (the "original")
-      // Subsequent edits: increment from highest version
       const nextVersion =
         existing.versions.length > 0 ? existing.versions[0].version + 1 : 1;
 
@@ -260,9 +323,37 @@ export class MinutesService {
       });
     }
 
-    return this.prisma.minutes.update({
+    const updated = await (this.prisma.minutes as any).update({
       where: { meetingId },
-      data: { content },
+      data: { content, status: 'UNDER_REVIEW' },
+    });
+
+    // Update search index
+    await this.searchService.indexMeeting(meeting, updated);
+
+    return updated;
+  }
+
+  async updateStatus(
+    meetingId: string,
+    userId: string,
+    status: string,
+    organizationId?: string,
+  ) {
+    // Verify access
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+    });
+    if (!meeting) throw new NotFoundException('Meeting not found');
+
+    return (this.prisma.minutes as any).update({
+      where: { meetingId },
+      data: {
+        status,
+        reviewerId: status === 'APPROVED' ? userId : undefined,
+      },
     });
   }
 
@@ -276,7 +367,7 @@ export class MinutesService {
     return minutes.versions;
   }
 
-  async revertToVersion(meetingId: string, version: number) {
+  async revertToVersion(meetingId: string, version: number, userId: string, organizationId?: string) {
     const minutes = await this.prisma.minutes.findUnique({
       where: { meetingId },
       include: { versions: { where: { version } } },
@@ -287,7 +378,7 @@ export class MinutesService {
     }
 
     const targetVersion = minutes.versions[0];
-    return this.updateMinutes(meetingId, targetVersion.content);
+    return this.updateMinutes(meetingId, userId, targetVersion.content, organizationId);
   }
 
   async translateMinutes(meetingId: string, userId: string, language: string) {
@@ -305,34 +396,33 @@ export class MinutesService {
 
     const prompt = `You are a professional meeting secretary fluent in ${language}.
 
-Translate the following meeting minutes into ${language} using:
+    Translate the following meeting minutes into ${language} using:
 
-## Translation Quality Requirements
-        - Use professional business register appropriate for ${language} culture
-          - Apply native - sounding phrasing(NOT literal word -for-word translation)
-        - Maintain proper formal grammar and business terminology
-          - Preserve the original meaning while adapting to ${language} conventions
+    ## Translation Quality Requirements
+    - **Native Professional Tone**: Use the specific business register appropriate for ${language} culture (e.g., Keigo for Japanese, confident formal for German).
+    - **No Literal Translation**: Rephrase sentences to sound completely natural to a native speaker.
+    - **Maintain Meaning**: Preserve all factual details, numbers, and names exactly.
 
-## Language - Specific Guidelines
-        - ** Spanish **: Use formal "usted" form, business - appropriate vocabulary
-          - ** French **: Use formal "vous" form, professional phrasing
-            - ** German **: Use formal "Sie" form, structured sentences
-              - ** Japanese **: Use です / ます form, appropriate keigo(敬語)
-                - ** Chinese **: Use formal written style(书面语)
-                  - ** Arabic **: Use Modern Standard Arabic, formal register
-                    - ** Portuguese **: Use formal "você/o senhor" as appropriate
-                      - ** Amharic **: Use formal respectful forms
+    ## Language-Specific Guidelines
+    - **Spanish**: Use formal "usted" form, business-appropriate vocabulary.
+    - **French**: Use formal "vous" form, professional phrasing.
+    - **German**: Use formal "Sie" form, structured business sentences.
+    - **Japanese**: Use proper business Keigo (Desu/Masu is minimum, Sonkeigo/Kenjougo where appropriate).
+    - **Chinese**: Use formal written style (书面语).
+    - **Arabic**: Use Modern Standard Arabic, formal register.
+    - **Portuguese**: Use formal "você/o senhor" as appropriate.
+    - **Amharic**: Use formal respectful forms.
 
-## Structure Requirements
-        - Maintain exact Markdown structure(headers, bullets, checkboxes, formatting)
-          - Keep section organization identical
-            - Preserve any names, dates, or specific terminology
+    ## Structure Requirements
+    - Maintain exact Markdown structure (headers, bullets, checkboxes, formatting).
+    - Keep section organization identical.
+    - Do NOT translate proper nouns (Company names, Product names) unless standard.
 
-Output ONLY the translated markdown.No explanations or notes.
+    Output ONLY the translated markdown. No explanations or notes.
 
-Minutes to translate:
-${meeting.minutes.content}
-      `;
+    Minutes to translate:
+    ${meeting.minutes.content}
+          `;
 
     const result = await withGeminiRetry(
       () => model.generateContent(prompt),
@@ -354,4 +444,3 @@ ${meeting.minutes.content}
     };
   }
 }
-

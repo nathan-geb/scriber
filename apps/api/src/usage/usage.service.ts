@@ -1,5 +1,7 @@
-import { Injectable, ForbiddenException } from '@nestjs/common';
+import { Injectable, ForbiddenException, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 
 export interface UsageCheckResult {
   allowed: boolean;
@@ -15,7 +17,10 @@ export interface UsageCheckResult {
 
 @Injectable()
 export class UsageService {
-  constructor(private prisma: PrismaService) { }
+  constructor(
+    private prisma: PrismaService,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+  ) { }
 
   private getWeekStart(): Date {
     const now = new Date();
@@ -27,6 +32,11 @@ export class UsageService {
   }
 
   async getUserUsage(userId: string): Promise<UsageCheckResult['usage']> {
+    const cacheKey = `usage:${userId}`;
+    const cached =
+      await this.cacheManager.get<UsageCheckResult['usage']>(cacheKey);
+    if (cached) return cached;
+
     // Check if user is admin - admins have no limits
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -224,7 +234,10 @@ export class UsageService {
         data: {
           uploadCount: { decrement: 1 },
           minutesProcessed: {
-            decrement: Math.min(durationMinutes, existingUsage.minutesProcessed),
+            decrement: Math.min(
+              durationMinutes,
+              existingUsage.minutesProcessed,
+            ),
           },
         },
       });

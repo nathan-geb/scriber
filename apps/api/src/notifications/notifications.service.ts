@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { NotificationType } from '@prisma/client';
+import { NotificationType } from '../generated/client';
 import * as nodemailer from 'nodemailer';
 import { Expo } from 'expo-server-sdk';
 

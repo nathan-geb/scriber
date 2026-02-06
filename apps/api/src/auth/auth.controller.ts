@@ -40,7 +40,7 @@ class RefreshTokenDto {
 
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) { }
+  constructor(private authService: AuthService) {}
 
   // Strict rate limiting for login: 5 attempts per minute
   @Post('login')
@@ -90,14 +90,36 @@ export class AuthController {
     // Redirect to frontend with token
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     // Use proper encoding for the user object if needed, but here we just pass tokens
-    // We pass the user object as a base64 string to avoid URL length issues or character issues, 
-    // but typically just tokens are enough and FE fetches profile. 
+    // We pass the user object as a base64 string to avoid URL length issues or character issues,
+    // but typically just tokens are enough and FE fetches profile.
     // However, existing AuthContext expects user object on login.
     // Let's pass tokens and let FE fetch profile or pass minimal user info.
     // Actually, AuthContext expects `user` object. Let's base64 encode it.
     const userJson = JSON.stringify(data.user);
     const userBase64 = Buffer.from(userJson).toString('base64');
 
-    res.redirect(`${frontendUrl}/auth/callback?token=${data.access_token}&refresh_token=${data.refresh_token}&user=${userBase64}`);
+    res.redirect(
+      `${frontendUrl}/auth/callback?token=${data.access_token}&refresh_token=${data.refresh_token}&user=${userBase64}`,
+    );
+  }
+
+  @Get('apple')
+  @UseGuards(AuthGuard('apple'))
+  async appleAuth(@Request() req: any) {
+    // Guard initiates redirect
+  }
+
+  @Post('apple/callback')
+  @UseGuards(AuthGuard('apple'))
+  async appleAuthRedirect(@Request() req: any, @Res() res: any) {
+    const data = await this.authService.login(req.user);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const userJson = JSON.stringify(data.user);
+    const userBase64 = Buffer.from(userJson).toString('base64');
+
+    // Apple sends a POST, but we redirect user back to our frontend via GET
+    res.redirect(
+      `${frontendUrl}/auth/callback?token=${data.access_token}&refresh_token=${data.refresh_token}&user=${userBase64}`,
+    );
   }
 }

@@ -1,176 +1,218 @@
 import {
-    Injectable,
-    NotFoundException,
-    ForbiddenException,
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { MomentType } from '@prisma/client';
+import { MomentType } from '../generated/client';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { withGeminiRetry } from '../common/gemini-retry';
 
 @Injectable()
 export class MomentsService {
-    constructor(private readonly prisma: PrismaService) { }
+  private genAI: GoogleGenerativeAI;
 
-    async findByMeeting(meetingId: string, userId: string) {
-        const meeting = await this.prisma.meeting.findFirst({
-            where: { id: meetingId, userId },
-        });
+  constructor(private readonly prisma: PrismaService) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
+    this.genAI = new GoogleGenerativeAI(apiKey);
+  }
 
-        if (!meeting) {
-            throw new NotFoundException('Meeting not found');
-        }
+  async findByMeeting(
+    meetingId: string,
+    userId: string,
+    organizationId?: string,
+  ) {
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+    });
 
-        return this.prisma.keyMoment.findMany({
-            where: { meetingId },
-            orderBy: { timestamp: 'asc' },
-        });
+    if (!meeting) {
+      throw new NotFoundException('Meeting not found');
     }
 
-    async create(
-        meetingId: string,
-        userId: string,
-        data: {
-            timestamp: number;
-            label: string;
-            description?: string;
-            type?: MomentType;
+    return this.prisma.keyMoment.findMany({
+      where: { meetingId },
+      orderBy: { timestamp: 'asc' },
+    });
+  }
+
+  async create(
+    meetingId: string,
+    userId: string,
+    organizationId: string | undefined,
+    data: {
+      timestamp: number;
+      label: string;
+      description?: string;
+      type?: MomentType;
+    },
+  ) {
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+    });
+
+    if (!meeting) {
+      throw new NotFoundException('Meeting not found');
+    }
+
+    return this.prisma.keyMoment.create({
+      data: {
+        meetingId,
+        timestamp: data.timestamp,
+        label: data.label,
+        description: data.description,
+        type: data.type || 'CUSTOM',
+        isAutomatic: false,
+        createdBy: userId,
+      },
+    });
+  }
+
+  async update(
+    id: string,
+    userId: string,
+    data: {
+      label?: string;
+      description?: string;
+      type?: MomentType;
+      timestamp?: number;
+    },
+  ) {
+    const moment = await this.prisma.keyMoment.findFirst({
+      where: { id },
+      include: { meeting: { select: { userId: true } } },
+    });
+
+    if (!moment) {
+      throw new NotFoundException('Moment not found');
+    }
+
+    if (moment.meeting.userId !== userId) {
+      throw new ForbiddenException('Not authorized to edit this moment');
+    }
+
+    return this.prisma.keyMoment.update({
+      where: { id },
+      data: {
+        label: data.label,
+        description: data.description,
+        type: data.type,
+        timestamp: data.timestamp,
+      },
+    });
+  }
+
+  async delete(id: string, userId: string) {
+    const moment = await this.prisma.keyMoment.findFirst({
+      where: { id },
+      include: { meeting: { select: { userId: true } } },
+    });
+
+    if (!moment) {
+      throw new NotFoundException('Moment not found');
+    }
+
+    if (moment.meeting.userId !== userId) {
+      throw new ForbiddenException('Not authorized to delete this moment');
+    }
+
+    await this.prisma.keyMoment.delete({ where: { id } });
+    return { success: true };
+  }
+
+  // Auto-detect key moments from transcript using AI
+  async autoDetect(meetingId: string, userId: string, organizationId?: string) {
+    const meeting = await (this.prisma.meeting as any).findFirst({
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
+      include: {
+        transcript: {
+          orderBy: { startTime: 'asc' },
+          include: { speaker: true },
         },
-    ) {
-        const meeting = await this.prisma.meeting.findFirst({
-            where: { id: meetingId, userId },
-        });
+      },
+    });
 
-        if (!meeting) {
-            throw new NotFoundException('Meeting not found');
-        }
-
-        return this.prisma.keyMoment.create({
-            data: {
-                meetingId,
-                timestamp: data.timestamp,
-                label: data.label,
-                description: data.description,
-                type: data.type || 'CUSTOM',
-                isAutomatic: false,
-                createdBy: userId,
-            },
-        });
+    if (!meeting) {
+      throw new NotFoundException('Meeting not found');
     }
 
-    async update(
-        id: string,
-        userId: string,
-        data: {
-            label?: string;
-            description?: string;
-            type?: MomentType;
-            timestamp?: number;
-        },
-    ) {
-        const moment = await this.prisma.keyMoment.findFirst({
-            where: { id },
-            include: { meeting: { select: { userId: true } } },
-        });
-
-        if (!moment) {
-            throw new NotFoundException('Moment not found');
-        }
-
-        if (moment.meeting.userId !== userId) {
-            throw new ForbiddenException('Not authorized to edit this moment');
-        }
-
-        return this.prisma.keyMoment.update({
-            where: { id },
-            data: {
-                label: data.label,
-                description: data.description,
-                type: data.type,
-                timestamp: data.timestamp,
-            },
-        });
+    const transcript = (meeting as any).transcript;
+    if (!transcript || transcript.length === 0) {
+      return [];
     }
 
-    async delete(id: string, userId: string) {
-        const moment = await this.prisma.keyMoment.findFirst({
-            where: { id },
-            include: { meeting: { select: { userId: true } } },
-        });
+    const transcriptText = transcript
+      .map(
+        (s: any) =>
+          `[${s.startTime.toFixed(1)}s] ${s.speaker?.name || 'Unknown'}: ${s.text}`,
+      )
+      .join('\n');
 
-        if (!moment) {
-            throw new NotFoundException('Moment not found');
-        }
+    const prompt = `You are a meeting intelligence agent. Analyze the following transcript and extract key moments.
+        
+        Focus on:
+        1. **DECISION**: Explicit choices or agreements made.
+        2. **ACTION_ITEM**: Tasks assigned to individuals or teams.
+        3. **QUESTION**: Critical open questions that need follow-up.
+        4. **KEY_POINT**: Important insights or context.
+        5. **DISAGREEMENT**: Points of contention or different viewpoints.
 
-        if (moment.meeting.userId !== userId) {
-            throw new ForbiddenException('Not authorized to delete this moment');
-        }
+        Format your response as a valid JSON array of objects:
+        [
+          {
+            "timestamp": number (in seconds),
+            "label": "Short, catchy title",
+            "description": "Short explanation (1-2 sentences)",
+            "type": "DECISION" | "ACTION_ITEM" | "QUESTION" | "KEY_POINT" | "DISAGREEMENT"
+          }
+        ]
 
-        await this.prisma.keyMoment.delete({ where: { id } });
-        return { success: true };
+        Transcript:
+        ${transcriptText}`;
+
+    const model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const result = await withGeminiRetry(
+      () => model.generateContent(prompt),
+      `Key moment detection for meeting ${meetingId}`,
+    );
+
+    const responseText = result.response.text();
+    let jsonString = responseText.replace(/```json\n?|\n?```/g, '').trim();
+    const arrayMatch = jsonString.match(/\[[\s\S]*\]/);
+    if (arrayMatch) jsonString = arrayMatch[0];
+
+    let detectedMoments: any[] = [];
+    try {
+      detectedMoments = JSON.parse(jsonString);
+    } catch (e) {
+      console.error('Failed to parse moments JSON:', e);
+      return [];
     }
 
-    // Auto-detect key moments from transcript (could be enhanced with AI)
-    async autoDetect(meetingId: string, userId: string) {
-        const meeting = await this.prisma.meeting.findFirst({
-            where: { id: meetingId, userId },
-            include: {
-                transcript: {
-                    orderBy: { startTime: 'asc' },
-                },
-            },
-        });
+    // Create moments in database
+    const created = await Promise.all(
+      detectedMoments.map((moment) =>
+        this.prisma.keyMoment.create({
+          data: {
+            meetingId,
+            timestamp: moment.timestamp,
+            label: moment.label,
+            description: moment.description,
+            type: moment.type || 'KEY_POINT',
+            isAutomatic: true,
+          },
+        }),
+      ),
+    );
 
-        if (!meeting) {
-            throw new NotFoundException('Meeting not found');
-        }
-
-        const detectedMoments: {
-            timestamp: number;
-            label: string;
-            type: MomentType;
-        }[] = [];
-
-        // Simple keyword-based detection (can be replaced with AI)
-        const patterns = [
-            { regex: /\b(decide|decision|agreed|let's go with)\b/i, type: 'DECISION' as MomentType, label: 'Decision Made' },
-            { regex: /\b(action item|todo|will do|I'll|need to)\b/i, type: 'ACTION_ITEM' as MomentType, label: 'Action Item' },
-            { regex: /\?\s*$/i, type: 'QUESTION' as MomentType, label: 'Question Asked' },
-            { regex: /\b(important|key point|note that|remember)\b/i, type: 'KEY_POINT' as MomentType, label: 'Key Point' },
-            { regex: /\b(disagree|but|however|on the other hand)\b/i, type: 'DISAGREEMENT' as MomentType, label: 'Discussion Point' },
-        ];
-
-        for (const segment of meeting.transcript) {
-            for (const pattern of patterns) {
-                if (pattern.regex.test(segment.text)) {
-                    // Avoid duplicates within 30 seconds
-                    const hasSimilar = detectedMoments.some(
-                        m => m.type === pattern.type && Math.abs(m.timestamp - segment.startTime) < 30,
-                    );
-                    if (!hasSimilar) {
-                        detectedMoments.push({
-                            timestamp: segment.startTime,
-                            label: pattern.label,
-                            type: pattern.type,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Create moments in database
-        const created = await Promise.all(
-            detectedMoments.map(moment =>
-                this.prisma.keyMoment.create({
-                    data: {
-                        meetingId,
-                        timestamp: moment.timestamp,
-                        label: moment.label,
-                        type: moment.type,
-                        isAutomatic: true,
-                    },
-                }),
-            ),
-        );
-
-        return created;
-    }
+    return created;
+  }
 }

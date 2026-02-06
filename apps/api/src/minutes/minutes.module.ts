@@ -11,4 +11,4 @@ import { EventsModule } from '../events/events.module';
   providers: [MinutesService, PrismaService],
   exports: [MinutesService],
 })
-export class MinutesModule { }
+export class MinutesModule {}

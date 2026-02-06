@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: scriber_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-nathan}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_DB: ${DB_NAME:-echomint}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - scriber_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nathan"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Cache & Queues
+  redis:
+    image: redis:alpine
+    container_name: scriber_redis
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - scriber_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: scriber_api
+    restart: always
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-nathan}:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-echomint}
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - scriber_net
+    volumes:
+      - ./uploads:/app/uploads
+
+  # Frontend Web
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: scriber_web
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: https://${DOMAIN_NAME:-scriber.app}/api
+      NODE_ENV: production
+    ports:
+      - "3001:3000"
+    networks:
+      - scriber_net
+
+networks:
+  scriber_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

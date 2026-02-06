@@ -9,9 +9,9 @@ import { PrismaService } from '../prisma/prisma.service';
 export class TagsService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(userId: string) {
+  async findAll(userId: string, organizationId?: string) {
     return this.prisma.tag.findMany({
-      where: { userId },
+      where: organizationId ? { organizationId } : { userId },
       orderBy: { name: 'asc' },
       include: {
         _count: { select: { meetings: true } },
@@ -19,11 +19,17 @@ export class TagsService {
     });
   }
 
-  async create(userId: string, name: string, color?: string) {
+  async create(
+    userId: string,
+    name: string,
+    organizationId?: string,
+    color?: string,
+  ) {
     try {
       return await this.prisma.tag.create({
         data: {
           userId,
+          organizationId,
           name: name.trim(),
           ...(color && { color }),
         },
@@ -41,9 +47,15 @@ export class TagsService {
     }
   }
 
-  async update(id: string, userId: string, name?: string, color?: string) {
+  async update(
+    id: string,
+    userId: string,
+    organizationId?: string,
+    name?: string,
+    color?: string,
+  ) {
     const tag = await this.prisma.tag.findFirst({
-      where: { id, userId },
+      where: organizationId ? { id, organizationId } : { id, userId },
     });
 
     if (!tag) throw new NotFoundException('Tag not found');
@@ -69,9 +81,9 @@ export class TagsService {
     }
   }
 
-  async delete(id: string, userId: string) {
+  async delete(id: string, userId: string, organizationId?: string) {
     const tag = await this.prisma.tag.findFirst({
-      where: { id, userId },
+      where: organizationId ? { id, organizationId } : { id, userId },
     });
 
     if (!tag) throw new NotFoundException('Tag not found');
@@ -81,11 +93,24 @@ export class TagsService {
   }
 
   // Meeting tag operations
-  async addTagToMeeting(meetingId: string, tagId: string, userId: string) {
+  async addTagToMeeting(
+    meetingId: string,
+    tagId: string,
+    userId: string,
+    organizationId?: string,
+  ) {
     // Verify ownership
     const [meeting, tag] = await Promise.all([
-      this.prisma.meeting.findFirst({ where: { id: meetingId, userId } }),
-      this.prisma.tag.findFirst({ where: { id: tagId, userId } }),
+      this.prisma.meeting.findFirst({
+        where: organizationId
+          ? { id: meetingId, organizationId }
+          : { id: meetingId, userId },
+      }),
+      this.prisma.tag.findFirst({
+        where: organizationId
+          ? { id: tagId, organizationId }
+          : { id: tagId, userId },
+      }),
     ]);
 
     if (!meeting) throw new NotFoundException('Meeting not found');
@@ -109,9 +134,16 @@ export class TagsService {
     }
   }
 
-  async removeTagFromMeeting(meetingId: string, tagId: string, userId: string) {
+  async removeTagFromMeeting(
+    meetingId: string,
+    tagId: string,
+    userId: string,
+    organizationId?: string,
+  ) {
     const meeting = await this.prisma.meeting.findFirst({
-      where: { id: meetingId, userId },
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
     });
 
     if (!meeting) throw new NotFoundException('Meeting not found');
@@ -127,9 +159,15 @@ export class TagsService {
     return { removed: true };
   }
 
-  async getMeetingTags(meetingId: string, userId: string) {
+  async getMeetingTags(
+    meetingId: string,
+    userId: string,
+    organizationId?: string,
+  ) {
     const meeting = await this.prisma.meeting.findFirst({
-      where: { id: meetingId, userId },
+      where: organizationId
+        ? { id: meetingId, organizationId }
+        : { id: meetingId, userId },
     });
 
     if (!meeting) throw new NotFoundException('Meeting not found');

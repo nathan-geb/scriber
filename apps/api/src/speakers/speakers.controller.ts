@@ -27,7 +27,7 @@ class MergeSpeakersDto {
 @Controller('meetings/:meetingId/speakers')
 @UseGuards(JwtAuthGuard)
 export class SpeakersController {
-  constructor(private readonly speakersService: SpeakersService) { }
+  constructor(private readonly speakersService: SpeakersService) {}
 
   @Get()
   async findByMeeting(

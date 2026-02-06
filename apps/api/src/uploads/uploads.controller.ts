@@ -14,37 +14,50 @@ import {
 } from '@nestjs/common';
 import { UploadsService } from './uploads.service';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { AuthGuard } from '@nestjs/passport';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { MemberRolesGuard } from '../auth/guards/member-roles.guard';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import {
   InitiateChunkedUploadDto,
   CompleteChunkedUploadDto,
 } from './dto/chunked-upload.dto';
-// import { PlanLimitGuard } from '../auth/plan-limit.guard'; // Use later when enabled
+
+interface AuthenticatedRequest extends Request {
+  user: {
+    userId: string;
+    email: string;
+    role: string;
+    orgId: string;
+  };
+}
 
 @Controller('uploads')
+@UseGuards(JwtAuthGuard, MemberRolesGuard)
 export class UploadsController {
-  constructor(private readonly uploadsService: UploadsService) { }
+  constructor(private readonly uploadsService: UploadsService) {}
 
   /**
    * Standard single-file upload
    */
-  @UseGuards(AuthGuard('jwt'))
+  @Roles('MEMBER', 'ADMIN', 'OWNER')
   @Post()
   @UseInterceptors(FileInterceptor('file'))
   async uploadFile(
     @UploadedFile() file: Express.Multer.File,
     @Body('language') languageCode: string,
     @Body('duration') durationStr: string,
-    @Request() req: any,
+    @Body('organizationId') organizationId: string,
+    @Request() req: AuthenticatedRequest,
   ) {
     if (!file) {
       throw new BadRequestException('File is required');
     }
     // Parse optional client-provided duration (for WebM fallback)
     const clientDuration = durationStr ? parseInt(durationStr, 10) : undefined;
-    return this.uploadsService.handleFileUpload(
+    return await this.uploadsService.handleFileUpload(
       file,
       req.user,
+      organizationId,
       languageCode,
       clientDuration,
     );
@@ -53,13 +66,13 @@ export class UploadsController {
   /**
    * Initiate a chunked upload session
    */
-  @UseGuards(AuthGuard('jwt'))
+  @Roles('MEMBER', 'ADMIN', 'OWNER')
   @Post('chunked/initiate')
   async initiateChunkedUpload(
     @Body() dto: InitiateChunkedUploadDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
-    return this.uploadsService.initiateChunkedUpload(
+    return await this.uploadsService.initiateChunkedUpload(
       req.user.userId,
       dto.filename,
       dto.totalSize,
@@ -72,19 +85,19 @@ export class UploadsController {
   /**
    * Upload a single chunk
    */
-  @UseGuards(AuthGuard('jwt'))
+  @Roles('MEMBER', 'ADMIN', 'OWNER')
   @Post('chunked/:uploadId/chunk/:chunkIndex')
   @UseInterceptors(FileInterceptor('chunk'))
   async uploadChunk(
     @Param('uploadId') uploadId: string,
     @Param('chunkIndex', ParseIntPipe) chunkIndex: number,
     @UploadedFile() chunk: Express.Multer.File,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
     if (!chunk) {
       throw new BadRequestException('Chunk data is required');
     }
-    return this.uploadsService.storeChunk(
+    return await this.uploadsService.storeChunk(
       uploadId,
       chunkIndex,
       chunk.buffer,
@@ -95,16 +108,17 @@ export class UploadsController {
   /**
    * Complete the chunked upload and start processing
    */
-  @UseGuards(AuthGuard('jwt'))
+  @Roles('MEMBER', 'ADMIN', 'OWNER')
   @Post('chunked/:uploadId/complete')
   async completeChunkedUpload(
     @Param('uploadId') uploadId: string,
     @Body() dto: CompleteChunkedUploadDto,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
-    return this.uploadsService.completeChunkedUpload(
+    return await this.uploadsService.completeChunkedUpload(
       uploadId,
       req.user.userId,
+      dto.organizationId,
       dto.language,
     );
   }
@@ -112,13 +126,13 @@ export class UploadsController {
   /**
    * Get chunked upload status
    */
-  @UseGuards(AuthGuard('jwt'))
+  @Roles('MEMBER', 'ADMIN', 'OWNER')
   @Get('chunked/:uploadId/status')
   async getUploadStatus(
     @Param('uploadId') uploadId: string,
-    @Request() req: any,
+    @Request() req: AuthenticatedRequest,
   ) {
-    const status = this.uploadsService.getUploadStatus(
+    const status = await this.uploadsService.getUploadStatus(
       uploadId,
       req.user.userId,
     );

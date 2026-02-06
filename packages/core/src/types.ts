@@ -15,6 +15,7 @@ export interface User {
         email: boolean;
         push: boolean;
     };
+    telegramId?: string;
 }
 
 export interface UserWithSubscription extends User {
@@ -69,7 +70,8 @@ export type MeetingStatus =
     | 'TRANSCRIPT_READY'
     | 'PROCESSING_MINUTES'
     | 'COMPLETED'
-    | 'FAILED';
+    | 'FAILED'
+    | 'CANCELLED';
 
 export interface Meeting {
     id: string;

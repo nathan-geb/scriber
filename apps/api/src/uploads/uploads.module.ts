@@ -7,12 +7,16 @@ import { extname } from 'path';
 import { PrismaModule } from '../prisma/prisma.module';
 import { UsageModule } from '../usage/usage.module';
 import { QueueModule } from '../queue/queue.module';
+import { EventsModule } from '../events/events.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
     PrismaModule,
     UsageModule,
     QueueModule,
+    EventsModule,
+    StorageModule,
     MulterModule.register({
       storage: diskStorage({
         destination: './uploads',
@@ -25,17 +29,21 @@ import { QueueModule } from '../queue/queue.module';
       }),
       fileFilter: (req, file, callback) => {
         // Allow common audio formats including browser recording formats
-        if (!file.mimetype.match(/audio\/(mpeg|mp3|wav|x-m4a|mp4|webm|ogg|aac|flac|x-wav)$/)) {
+        if (
+          !file.mimetype.match(
+            /audio\/(mpeg|mp3|wav|x-m4a|mp4|webm|ogg|aac|flac|x-wav)$/,
+          )
+        ) {
           return callback(new Error('Only audio files are allowed!'), false);
         }
         callback(null, true);
       },
       limits: {
-        fileSize: 25 * 1024 * 1024, // 25MB
+        fileSize: 500 * 1024 * 1024, // 500MB
       },
     }),
   ],
   controllers: [UploadsController],
   providers: [UploadsService],
 })
-export class UploadsModule { }
+export class UploadsModule {}
