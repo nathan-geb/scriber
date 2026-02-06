@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Database
   postgres:
@@ -7,15 +5,15 @@ services:
     container_name: scriber_db
     restart: always
     environment:
-      POSTGRES_USER: ${DB_USER:-nathan}
+      POSTGRES_USER: ${DB_USER:-scriber}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
-      POSTGRES_DB: ${DB_NAME:-echomint}
+      POSTGRES_DB: ${DB_NAME:-scriber}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - scriber_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nathan"]
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-scriber}" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,7 +29,7 @@ services:
     networks:
       - scriber_net
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -43,13 +41,13 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: scriber_api
     restart: always
+    env_file:
+      - .env.prod
     environment:
-      DATABASE_URL: postgres://${DB_USER:-nathan}:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-echomint}
+      DATABASE_URL: postgres://${DB_USER:-scriber}:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-scriber}
       REDIS_URL: redis://redis:6379
       NODE_ENV: production
       PORT: 3000
-      JWT_SECRET: ${JWT_SECRET}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
     ports:
       - "3000:3000"
     depends_on:
@@ -60,7 +58,7 @@ services:
     networks:
       - scriber_net
     volumes:
-      - ./uploads:/app/uploads
+      - ./uploads:/app/apps/api/uploads
 
   # Frontend Web
   web:
@@ -70,7 +68,7 @@ services:
     container_name: scriber_web
     restart: always
     environment:
-      NEXT_PUBLIC_API_URL: https://${DOMAIN_NAME:-scriber.app}/api
+      NEXT_PUBLIC_API_URL: https://${DOMAIN_NAME:-scriber.bernos.systems}/api
       NODE_ENV: production
     ports:
       - "3001:3000"
