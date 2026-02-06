@@ -1,0 +1,12 @@
+node_modules
+.pnpm-store
+.git
+.DS_Store
+*.log
+.env
+.env.*
+uploads
+dist
+.next
+coverage
+*.md
