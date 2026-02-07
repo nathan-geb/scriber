@@ -6,9 +6,9 @@ import { QueueModule } from '../queue/queue.module';
 import { EventsModule } from '../events/events.module';
 
 @Module({
-  imports: [forwardRef(() => QueueModule), EventsModule],
+  imports: [forwardRef(() => QueueModule), EventsModule, PrismaModule],
   controllers: [MinutesController],
-  providers: [MinutesService, PrismaService],
+  providers: [MinutesService],
   exports: [MinutesService],
 })
-export class MinutesModule {}
+export class MinutesModule { }
