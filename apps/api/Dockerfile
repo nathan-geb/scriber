@@ -17,13 +17,11 @@ RUN pnpm install --frozen-lockfile
 COPY apps/api/ apps/api/
 COPY packages/core/ packages/core/
 
-# Generate Prisma client
+# Generate Prisma client and build
 RUN cd apps/api && npx prisma generate
-
-# Build the API
-WORKDIR /app/apps/api
-RUN pnpm run build
+RUN cd apps/api && pnpm run build
 
 EXPOSE 3000
 
-CMD ["node", "dist/main"]
+# Run from /app so node_modules resolution works
+CMD ["node", "apps/api/dist/src/main.js"]
