@@ -1,11 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { ShareType } from '../generated/client';
+import { ShareType } from '@prisma/client';
 import { randomBytes } from 'crypto';
 
 @Injectable()
 export class SharesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   async createShareLink(
     userId: string,

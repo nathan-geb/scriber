@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Prisma, MeetingStatus } from '../generated/client';
+import { Prisma, MeetingStatus } from '@prisma/client';
 import { SearchService } from '../search/search.service';
 import { unlink } from 'fs/promises';
 import { existsSync } from 'fs';

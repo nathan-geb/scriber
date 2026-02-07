@@ -1,5 +1,5 @@
 
-import { PrismaClient } from '../src/generated/client';
+import { PrismaClient } from '@prisma/client';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';

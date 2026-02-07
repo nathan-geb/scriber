@@ -4,7 +4,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { MomentType } from '../generated/client';
+import { MomentType } from '@prisma/client';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { withGeminiRetry } from '../common/gemini-retry';
 

@@ -18,7 +18,7 @@ import {
 } from 'class-validator';
 import { MomentsService } from './moments.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { MomentType } from '../generated/client';
+import { MomentType } from '@prisma/client';
 
 class CreateMomentDto {
   @IsNumber()
@@ -58,7 +58,7 @@ class UpdateMomentDto {
 @Controller('meetings/:meetingId/moments')
 @UseGuards(JwtAuthGuard)
 export class MomentsController {
-  constructor(private readonly momentsService: MomentsService) {}
+  constructor(private readonly momentsService: MomentsService) { }
 
   @Get()
   async findByMeeting(
