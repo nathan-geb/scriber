@@ -13,6 +13,8 @@ import { EventsModule } from '../events/events.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { UsageModule } from '../usage/usage.module';
 import { SpeakersModule } from '../speakers/speakers.module';
+import { BillingModule } from '../billing/billing.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
@@ -35,6 +37,8 @@ import { SpeakersModule } from '../speakers/speakers.module';
     PrismaModule,
     UsageModule,
     SpeakersModule,
+    BillingModule,
+    StorageModule,
   ],
   controllers: [JobsController],
   providers: [
@@ -47,4 +51,4 @@ import { SpeakersModule } from '../speakers/speakers.module';
   ],
   exports: [BullModule, JobsService],
 })
-export class QueueModule {}
+export class QueueModule { }
