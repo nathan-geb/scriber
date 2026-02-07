@@ -11,7 +11,7 @@ COPY packages/core/package.json packages/core/
 
 # Install pnpm and dependencies
 RUN npm install -g pnpm
-RUN pnpm install --frozen-lockfile
+RUN pnpm install
 
 # Copy source files
 COPY apps/api/ apps/api/
