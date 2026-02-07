@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { SentryContextInterceptor } from './monitoring/sentry-context.interceptor';
@@ -32,6 +33,8 @@ import { CalendarModule } from './calendar/calendar.module';
 
 @Module({
   imports: [
+    // Configuration must be global to be used in all modules
+    ConfigModule.forRoot({ isGlobal: true }),
     // Sentry must be first for proper error capturing
     SentryModule.forRoot(),
     // Rate limiting - default 100 requests per minute
@@ -93,4 +96,4 @@ import { CalendarModule } from './calendar/calendar.module';
     },
   ],
 })
-export class AppModule {}
+export class AppModule { }
