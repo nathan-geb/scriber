@@ -1,7 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { MinutesService } from './minutes.service';
 import { MinutesController } from './minutes.controller';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaModule } from '../prisma/prisma.module';
 import { QueueModule } from '../queue/queue.module';
 import { EventsModule } from '../events/events.module';
 
