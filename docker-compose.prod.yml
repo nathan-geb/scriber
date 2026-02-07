@@ -44,6 +44,8 @@ services:
     environment:
       DATABASE_URL: postgres://${DB_USER:-scriber}:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-scriber}
       REDIS_URL: redis://redis:6379
+      MEILISEARCH_HOST: http://meilisearch:7700
+      MEILISEARCH_KEY: ${MEILISEARCH_KEY:-masterKey}
       NODE_ENV: production
       PORT: 3000
     ports:
@@ -53,10 +55,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      meilisearch:
+        condition: service_started
     networks:
       - scriber_net
     volumes:
       - ./uploads:/app/apps/api/uploads
+
+  # Search Engine
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    container_name: scriber_meilisearch
+    restart: always
+    environment:
+      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:-masterKey}
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_HTTP_ADDR: "0.0.0.0:7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    networks:
+      - scriber_net
 
   # Frontend Web (pre-built image from Docker Hub)
   web:
@@ -78,3 +96,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  meilisearch_data:

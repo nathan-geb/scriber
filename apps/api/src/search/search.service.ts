@@ -13,20 +13,26 @@ export class SearchService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // Ensure index exists and has correct settings
-    const index = this.client.index(this.indexName);
-    await index.updateSettings({
-      searchableAttributes: ['title', 'content', 'transcript'],
-      filterableAttributes: ['organizationId', 'userId', 'status'],
-      rankingRules: [
-        'words',
-        'typo',
-        'proximity',
-        'attribute',
-        'sort',
-        'exactness',
-      ],
-    });
+    try {
+      // Ensure index exists and has correct settings
+      const index = this.client.index(this.indexName);
+      await index.updateSettings({
+        searchableAttributes: ['title', 'content', 'transcript'],
+        filterableAttributes: ['organizationId', 'userId', 'status'],
+        rankingRules: [
+          'words',
+          'typo',
+          'proximity',
+          'attribute',
+          'sort',
+          'exactness',
+        ],
+      });
+      console.log('MeiliSearch index settings updated successfully');
+    } catch (error) {
+      console.error('Failed to connect to MeiliSearch or update settings:', error.message);
+      console.warn('Search functionality may be limited or unavailable.');
+    }
   }
 
   async indexMeeting(meeting: any, minutes?: any, transcript?: string) {
