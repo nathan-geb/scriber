@@ -47,11 +47,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
     }, []);
 
+    // Cookie helpers for middleware auth check
+    const setCookie = (name: string, value: string, days: number = 7) => {
+        const expires = new Date(Date.now() + days * 864e5).toUTCString();
+        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+    };
+
+    const deleteCookie = (name: string) => {
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+    };
+
     const logout = useCallback(() => {
         clearRefreshTimeout();
         localStorage.removeItem('token');
         localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
+        deleteCookie('token');
         setToken(null);
         setUser(null);
         router.push('/login');
@@ -82,6 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             localStorage.setItem('token', data.access_token);
             localStorage.setItem('refresh_token', data.refresh_token);
             localStorage.setItem('user', JSON.stringify(data.user));
+            setCookie('token', data.access_token);
 
             setToken(data.access_token);
             setUser(data.user);
@@ -117,6 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem('token', tokens.access_token);
         localStorage.setItem('refresh_token', tokens.refresh_token);
         localStorage.setItem('user', JSON.stringify(newUser));
+        setCookie('token', tokens.access_token);
         setToken(tokens.access_token);
         setUser(newUser);
         scheduleTokenRefresh(tokens.expires_in);

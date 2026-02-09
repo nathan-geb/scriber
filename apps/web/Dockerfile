@@ -20,9 +20,12 @@ COPY packages/core/ packages/core/
 # Build the web app
 RUN cd apps/web && pnpm run build
 
+# Copy static files that standalone doesn't include
+RUN cp -r /app/apps/web/.next/static /app/apps/web/.next/standalone/apps/web/.next/static
+RUN cp -r /app/apps/web/public /app/apps/web/.next/standalone/apps/web/public || true
+
 EXPOSE 3000
 
 # Next.js standalone output is structured as apps/web/.next/standalone/apps/web/server.js
-# with node_modules at apps/web/.next/standalone/node_modules
 WORKDIR /app/apps/web/.next/standalone
 CMD ["node", "apps/web/server.js"]

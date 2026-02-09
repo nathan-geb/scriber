@@ -21,7 +21,11 @@ COPY packages/core/ packages/core/
 RUN cd apps/api && npx prisma generate
 RUN cd apps/api && pnpm run build
 
+# Copy startup script
+COPY apps/api/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 EXPOSE 3000
 
-# Run from /app so node_modules resolution works
-CMD ["node", "apps/api/dist/src/main.js"]
+# Run startup script which handles migrations and starts the server
+CMD ["/docker-entrypoint.sh"]
